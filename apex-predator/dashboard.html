@@ -1,0 +1,385 @@
+// dashboard.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Apex Predator Bot Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0a0e1a;
+      color: #e4e8f0;
+      padding: 20px;
+    }
+    
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    
+    h1 {
+      font-size: 32px;
+      margin-bottom: 24px;
+      color: #00ff88;
+    }
+    
+    .status-bar {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+    
+    .status-card {
+      flex: 1;
+      min-width: 200px;
+      background: #151b2d;
+      border: 1px solid #2a3447;
+      border-radius: 12px;
+      padding: 20px;
+    }
+    
+    .status-card.active {
+      border-color: #00ff88;
+    }
+    
+    .status-card.warning {
+      border-color: #ffaa00;
+    }
+    
+    .status-card.error {
+      border-color: #ff4444;
+    }
+    
+    .status-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      color: #7d8a9f;
+      margin-bottom: 8px;
+    }
+    
+    .status-value {
+      font-size: 28px;
+      font-weight: 600;
+    }
+    
+    .charts {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    
+    .chart-card {
+      background: #151b2d;
+      border: 1px solid #2a3447;
+      border-radius: 12px;
+      padding: 20px;
+    }
+    
+    .chart-title {
+      font-size: 16px;
+      margin-bottom: 16px;
+      color: #e4e8f0;
+    }
+    
+    .logs {
+      background: #151b2d;
+      border: 1px solid #2a3447;
+      border-radius: 12px;
+      padding: 20px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+    
+    .log-entry {
+      padding: 8px;
+      border-bottom: 1px solid #2a3447;
+      font-size: 13px;
+      font-family: 'Courier New', monospace;
+    }
+    
+    .log-entry.profit {
+      color: #00ff88;
+    }
+    
+    .log-entry.warning {
+      color: #ffaa00;
+    }
+    
+    .log-entry.error {
+      color: #ff4444;
+    }
+    
+    .refresh-btn {
+      background: #00ff88;
+      color: #0a0e1a;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-bottom: 20px;
+    }
+    
+    .refresh-btn:hover {
+      background: #00dd77;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎯 Apex Predator Bot Dashboard</h1>
+    
+    <button class="refresh-btn" onclick="refreshData()">Refresh Data</button>
+    
+    <div class="status-bar">
+      <div class="status-card active" id="status-card">
+        <div class="status-label">Bot Status</div>
+        <div class="status-value" id="bot-status">🟢 RUNNING</div>
+      </div>
+      
+      <div class="status-card">
+        <div class="status-label">Opportunities (24h)</div>
+        <div class="status-value" id="opportunities">0</div>
+      </div>
+      
+      <div class="status-card">
+        <div class="status-label">Trades Executed</div>
+        <div class="status-value" id="trades">0</div>
+      </div>
+      
+      <div class="status-card">
+        <div class="status-label">Total Profit</div>
+        <div class="status-value" id="profit">$0.00</div>
+      </div>
+      
+      <div class="status-card">
+        <div class="status-label">Success Rate</div>
+        <div class="status-value" id="success-rate">0%</div>
+      </div>
+    </div>
+    
+    <div class="charts">
+      <div class="chart-card">
+        <div class="chart-title">Profit Over Time</div>
+        <canvas id="profit-chart"></canvas>
+      </div>
+      
+      <div class="chart-card">
+        <div class="chart-title">Opportunities by Status</div>
+        <canvas id="status-chart"></canvas>
+      </div>
+      
+      <div class="chart-card">
+        <div class="chart-title">Gas Price Trends</div>
+        <canvas id="gas-chart"></canvas>
+      </div>
+      
+      <div class="chart-card">
+        <div class="chart-title">Builder Performance</div>
+        <canvas id="builder-chart"></canvas>
+      </div>
+    </div>
+    
+    <div class="chart-card">
+      <div class="chart-title">Recent Activity Logs</div>
+      <div class="logs" id="logs">
+        <div class="log-entry">Waiting for data...</div>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    // Initialize charts
+    const profitChart = new Chart(document.getElementById('profit-chart'), {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'Cumulative Profit ($)',
+          data: [],
+          borderColor: '#00ff88',
+          backgroundColor: 'rgba(0, 255, 136, 0.1)',
+          tension: 0.4
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        plugins: {
+          legend: { labels: { color: '#e4e8f0' } }
+        },
+        scales: {
+          y: { ticks: { color: '#7d8a9f' }, grid: { color: '#2a3447' } },
+          x: { ticks: { color: '#7d8a9f' }, grid: { color: '#2a3447' } }
+        }
+      }
+    });
+    
+    const statusChart = new Chart(document.getElementById('status-chart'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Detected', 'Simulated', 'Executed', 'Failed'],
+        datasets: [{
+          data: [0, 0, 0, 0],
+          backgroundColor: ['#4488ff', '#00ff88', '#00dd77', '#ff4444']
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { labels: { color: '#e4e8f0' } }
+        }
+      }
+    });
+    
+    const gasChart = new Chart(document.getElementById('gas-chart'), {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'Base Fee (gwei)',
+          data: [],
+          borderColor: '#ffaa00',
+          backgroundColor: 'rgba(255, 170, 0, 0.1)',
+          tension: 0.4
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { labels: { color: '#e4e8f0' } }
+        },
+        scales: {
+          y: { ticks: { color: '#7d8a9f' }, grid: { color: '#2a3447' } },
+          x: { ticks: { color: '#7d8a9f' }, grid: { color: '#2a3447' } }
+        }
+      }
+    });
+    
+    const builderChart = new Chart(document.getElementById('builder-chart'), {
+      type: 'bar',
+      data: {
+        labels: ['Flashbots', 'Titan', 'Beaver'],
+        datasets: [{
+          label: 'Success Rate (%)',
+          data: [0, 0, 0],
+          backgroundColor: '#00ff88'
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { labels: { color: '#e4e8f0' } }
+        },
+        scales: {
+          y: { 
+            beginAtZero: true,
+            max: 100,
+            ticks: { color: '#7d8a9f' },
+            grid: { color: '#2a3447' }
+          },
+          x: { ticks: { color: '#7d8a9f' }, grid: { color: '#2a3447' } }
+        }
+      }
+    });
+    
+    // Fetch data from Supabase
+    async function refreshData() {
+      // This would connect to your Supabase instance
+      // For now, simulate with random data
+      
+      // Update status cards
+      document.getElementById('opportunities').textContent = Math.floor(Math.random() * 100);
+      document.getElementById('trades').textContent = Math.floor(Math.random() * 20);
+      document.getElementById('profit').textContent = '$' + (Math.random() * 500).toFixed(2);
+      document.getElementById('success-rate').textContent = (Math.random() * 100).toFixed(1) + '%';
+      
+      // Update charts with sample data
+      updateProfitChart();
+      updateStatusChart();
+      updateGasChart();
+      updateBuilderChart();
+      updateLogs();
+    }
+    
+    function updateProfitChart() {
+      const now = new Date();
+      const labels = [];
+      const data = [];
+      let cumProfit = 0;
+      
+      for (let i = 23; i >= 0; i--) {
+        const hour = new Date(now - i * 3600000);
+        labels.push(hour.getHours() + ':00');
+        cumProfit += Math.random() * 20 - 5;
+        data.push(cumProfit);
+      }
+      
+      profitChart.data.labels = labels;
+      profitChart.data.datasets[0].data = data;
+      profitChart.update();
+    }
+    
+    function updateStatusChart() {
+      statusChart.data.datasets[0].data = [
+        Math.floor(Math.random() * 50),
+        Math.floor(Math.random() * 30),
+        Math.floor(Math.random() * 10),
+        Math.floor(Math.random() * 10)
+      ];
+      statusChart.update();
+    }
+    
+    function updateGasChart() {
+      const labels = [];
+      const data = [];
+      
+      for (let i = 19; i >= 0; i--) {
+        labels.push('-' + i + 'm');
+        data.push(15 + Math.random() * 10);
+      }
+      
+      gasChart.data.labels = labels;
+      gasChart.data.datasets[0].data = data;
+      gasChart.update();
+    }
+    
+    function updateBuilderChart() {
+      builderChart.data.datasets[0].data = [
+        85 + Math.random() * 10,
+        80 + Math.random() * 10,
+        75 + Math.random() * 10
+      ];
+      builderChart.update();
+    }
+    
+    function updateLogs() {
+      const logs = document.getElementById('logs');
+      const entries = [
+        '<div class="log-entry profit">[12:34:56] Trade executed: $12.50 profit (Flashbots)</div>',
+        '<div class="log-entry">[12:34:45] Opportunity detected: USDC→WETH→USDT (45 bps)</div>',
+        '<div class="log-entry warning">[12:34:30] Gas spike detected: 35 gwei</div>',
+        '<div class="log-entry">[12:34:15] WSS reconnected after 2s</div>',
+        '<div class="log-entry profit">[12:34:00] Trade executed: $8.75 profit (Titan)</div>'
+      ];
+      logs.innerHTML = entries.join('');
+    }
+    
+    // Auto-refresh every 30 seconds
+    setInterval(refreshData, 30000);
+    
+    // Initial load
+    refreshData();
+  </script>
+</body>
+</html>
