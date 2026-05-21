@@ -1,0 +1,194 @@
+// filepath: main.go
+package main
+
+import (
+	"context"
+	"fmt"
+	"math/big"
+	"math/rand"
+	"os"
+	"os/signal"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/config"
+	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/arbitrage"
+	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/dex"
+	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/flashloan"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+const (
+	BaseChainID     = 8453
+	GraphRebuildEvery = 120 // rebuild pool graph every N scans
+)
+
+func main() {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config error:", err)
+		os.Exit(1)
+	}
+
+	logger := buildLogger(cfg.LogLevel)
+	defer logger.Sync() //nolint:errcheck
+
+	logger.Info("Apex Predator Go — starting",
+		zap.Int("chain_id", BaseChainID),
+		zap.Bool("dry_run", cfg.DryRun),
+		zap.Int("rpc_count", len(cfg.RPCURLs)),
+	)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// ── RPC client pool ──────────────────────────────────────────────────────
+	clients := make([]*ethclient.Client, 0, len(cfg.RPCURLs))
+	for _, url := range cfg.RPCURLs {
+		c, err := ethclient.DialContext(ctx, url)
+		if err != nil {
+			logger.Warn("failed to connect to RPC", zap.String("url", url), zap.Error(err))
+			continue
+		}
+		clients = append(clients, c)
+	}
+	if len(clients) == 0 {
+		logger.Fatal("no usable RPC connections")
+	}
+	defer func() {
+		for _, c := range clients {
+			c.Close()
+		}
+	}()
+
+	var rpcIdx atomic.Uint32
+	nextClient := func() *ethclient.Client {
+		idx := rpcIdx.Add(1) - 1
+		return clients[int(idx)%len(clients)]
+	}
+
+	// ── DEX adapters ─────────────────────────────────────────────────────────
+	uniV3, err := dex.NewUniswapV3(nextClient())
+	if err != nil {
+		logger.Fatal("uniswap init", zap.Error(err))
+	}
+	aero, err := dex.NewAerodrome(nextClient())
+	if err != nil {
+		logger.Fatal("aerodrome init", zap.Error(err))
+	}
+	router := dex.NewRouter([]dex.DEX{uniV3, aero}, logger)
+
+	// ── Triangle detector ─────────────────────────────────────────────────────
+	tokens := dex.AllBaseTokens()
+	detector := arbitrage.NewDetector(router, tokens, logger)
+
+	logger.Info("building initial pool graph…")
+	if err := detector.RebuildGraph(ctx); err != nil {
+		logger.Fatal("initial graph build failed", zap.Error(err))
+	}
+
+	// ── Flash loan executor ───────────────────────────────────────────────────
+	flExec, err := flashloan.NewExecutor(
+		nextClient(),
+		common.HexToAddress(cfg.FlashLoanContract),
+		cfg.PrivateKey,
+		cfg.GasLimitArb,
+		big.NewInt(BaseChainID),
+		logger,
+	)
+	if err != nil {
+		logger.Fatal("flash loan executor init", zap.Error(err))
+	}
+
+	exec := arbitrage.NewExecutor(cfg, flExec, nextClient(), logger)
+
+	// ── Gas cost estimate in USDC micro-units ────────────────────────────────
+	// 250_000 gas × ~0.01 gwei base fee on Base × $3000/ETH ≈ $0.0075
+	// Use a conservative $0.05 = 50_000 USDC units as the gas cost floor.
+	gasCostBase := big.NewInt(50_000)
+
+	minProfit := big.NewInt(cfg.MinProfitUSDC)
+	// Default flash loan: $1000 USDC
+	amountIn := new(big.Int).Mul(big.NewInt(1_000), big.NewInt(1_000_000))
+
+	// ── Main scan loop ───────────────────────────────────────────────────────
+	ticker := time.NewTicker(cfg.ScanInterval)
+	defer ticker.Stop()
+
+	var scanCount uint64
+	logger.Info("bot LIVE — scanning for profitable cycles",
+		zap.String("base_token", "USDC"),
+		zap.String("amount_in", "$1000"),
+		zap.Int64("min_profit_usdc_units", cfg.MinProfitUSDC),
+	)
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("shutting down")
+			return
+
+		case <-ticker.C:
+			scanCount++
+
+			// Rotate RPC every N scans (anti-detection)
+			if scanCount%uint64(cfg.RPCRotateEvery) == 0 {
+				rpcIdx.Add(1)
+			}
+
+			// Rebuild graph periodically to pick up new pools
+			if scanCount%GraphRebuildEvery == 0 {
+				go func() {
+					rebuildCtx, done := context.WithTimeout(ctx, 30*time.Second)
+					defer done()
+					if err := detector.RebuildGraph(rebuildCtx); err != nil {
+						logger.Warn("graph rebuild failed", zap.Error(err))
+					}
+				}()
+			}
+
+			// Random jitter (anti-detection)
+			if cfg.MaxJitterMS > 0 {
+				jitter := time.Duration(rand.Intn(cfg.MaxJitterMS)) * time.Millisecond
+				time.Sleep(jitter)
+			}
+
+			scanCtx, done := context.WithTimeout(ctx, 4*time.Second)
+			cycles, err := detector.FindCycles(scanCtx, dex.BaseTokens.USDC, amountIn, gasCostBase, minProfit)
+			done()
+
+			if err != nil {
+				logger.Warn("cycle detection error", zap.Error(err))
+				continue
+			}
+			if len(cycles) == 0 {
+				continue
+			}
+
+			logger.Info("cycles found", zap.Int("count", len(cycles)),
+				zap.String("best_pnl", cycles[0].NetPnLUSDC.String()))
+
+			// Execute only the best cycle per scan to avoid nonce conflicts
+			execCtx, done := context.WithTimeout(ctx, 10*time.Second)
+			if err := exec.Execute(execCtx, cycles[0]); err != nil {
+				logger.Error("execution error", zap.Error(err))
+			}
+			done()
+		}
+	}
+}
+
+func buildLogger(level string) *zap.Logger {
+	lvl := zapcore.InfoLevel
+	_ = lvl.UnmarshalText([]byte(strings.ToLower(level)))
+	cfg := zap.NewProductionConfig()
+	cfg.Level = zap.NewAtomicLevelAt(lvl)
+	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	l, _ := cfg.Build()
+	return l
+}
