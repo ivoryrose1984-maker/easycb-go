@@ -1,6 +1,6 @@
 // src/core/bundleSubmitter.ts
 import { ethers } from 'ethers';
-import { FlashbotsBundleProvider } from '@flashbots/ethers-provider-bundle';
+import { FlashbotsBundleProvider, FlashbotsBundleResolution } from '@flashbots/ethers-provider-bundle';
 import CONFIG from '../config/constants';
 import { logBuilderStats } from '../infrastructure/supabaseLogger';
 
@@ -83,8 +83,8 @@ export async function submitBundleWithFailover(
       console.log(`[BUNDLE] 📤 Submitted to ${builder.name}, waiting...`);
       const waitResponse = await bundleSubmission.wait();
 
-      // Flashbots SDK: -1 = included, 0/1/2 = waiting, positive = not included after N blocks
-      if (waitResponse === -1) {
+      // FlashbotsBundleResolution: 0=BundleIncluded, 1=BlockPassedWithoutInclusion, 2=AccountNonceTooHigh
+      if (waitResponse === FlashbotsBundleResolution.BundleIncluded) {
         console.log(`[BUNDLE] ✅ ${builder.name} INCLUDED in block ${targetBlockNumber}`);
         await logBuilderStats({
           builder_name: builder.name, success: true,
@@ -94,10 +94,11 @@ export async function submitBundleWithFailover(
         return { success: true, builder: builder.name, simulationResult: simulation };
       }
 
-      console.warn(`[BUNDLE] ${builder.name} not included (code ${waitResponse})`);
+      const resolutionName = FlashbotsBundleResolution[waitResponse] ?? String(waitResponse);
+      console.warn(`[BUNDLE] ${builder.name} not included: ${resolutionName}`);
       await logBuilderStats({
         builder_name: builder.name, success: false,
-        block_number: targetBlockNumber, error_message: `Not included (code ${waitResponse})`,
+        block_number: targetBlockNumber, error_message: `Not included: ${FlashbotsBundleResolution[waitResponse] ?? waitResponse}`,
         response_time_ms: Date.now() - startTime,
       });
 
