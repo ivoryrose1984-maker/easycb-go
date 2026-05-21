@@ -74,7 +74,7 @@ export async function getGasForecast(
 
 function getDefaultForecast(): GasForecast {
   return {
-    predictedBaseFee:   gweiToWei(20n),
+    predictedBaseFee:   gweiToWei(1n),  // Base L2 is ~0.001-0.1 gwei; 1 gwei is a safe fallback
     predictedPriority:  gweiToWei(CONFIG.MIN_PRIORITY_FEE_GWEI),
     volatility:         0.5,
     dynamicPriorityPct: 15,

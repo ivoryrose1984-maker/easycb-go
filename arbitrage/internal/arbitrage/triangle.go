@@ -215,8 +215,8 @@ func (d *Detector) simulateCycle(
 		},
 		AmountIn:   new(big.Int).Set(amountIn),
 		AmountOut:  new(big.Int).Set(q3.AmountOut),
-		GrossPnL:   gross,
-		GasCostWei: gasCostBase,
+		GrossPnL:  gross,
+		GasCostEst: gasCostBase,
 		NetPnLUSDC: net,
 	}, nil
 }

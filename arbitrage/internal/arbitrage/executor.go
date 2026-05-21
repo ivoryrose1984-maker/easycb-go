@@ -13,6 +13,8 @@ import (
 	"go.uber.org/zap"
 )
 
+var weiPerGwei = new(big.Float).SetInt(big.NewInt(1_000_000_000))
+
 // Executor decides whether to execute a cycle and fires the flash loan.
 type Executor struct {
 	cfg      *config.Config
@@ -28,6 +30,22 @@ func NewExecutor(cfg *config.Config, fl *flashloan.Executor, client *ethclient.C
 
 // Execute evaluates and optionally fires a flash loan for the best cycle.
 func (e *Executor) Execute(ctx context.Context, cycle *types.Cycle) error {
+	// Gate on max gas price to avoid executing during fee spikes
+	if e.cfg.MaxGasGwei > 0 {
+		if head, err := e.client.HeaderByNumber(ctx, nil); err == nil && head.BaseFee != nil {
+			baseFeeGwei, _ := new(big.Float).Quo(
+				new(big.Float).SetInt(head.BaseFee), weiPerGwei,
+			).Float64()
+			if baseFeeGwei > e.cfg.MaxGasGwei {
+				e.logger.Info("base fee above max — skipping cycle",
+					zap.Float64("base_fee_gwei", baseFeeGwei),
+					zap.Float64("max_gas_gwei", e.cfg.MaxGasGwei),
+				)
+				return nil
+			}
+		}
+	}
+
 	minProfit := big.NewInt(e.cfg.MinProfitUSDC)
 	if cycle.NetPnLUSDC.Cmp(minProfit) < 0 {
 		e.logger.Debug("cycle below min profit threshold",

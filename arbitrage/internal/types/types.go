@@ -53,7 +53,7 @@ type Cycle struct {
 	AmountIn    *big.Int
 	AmountOut   *big.Int   // final amount back in Tokens[0]
 	GrossPnL    *big.Int   // AmountOut - AmountIn
-	GasCostWei  *big.Int
+	GasCostEst  *big.Int   // estimated gas cost in Tokens[0] units (same as AmountIn denomination)
 	NetPnLUSDC  *big.Int   // after gas, denominated in Tokens[0] units
 }
 

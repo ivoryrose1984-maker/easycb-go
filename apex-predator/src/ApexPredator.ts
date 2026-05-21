@@ -8,7 +8,7 @@ import { initTelegram, alertProfit, alertCircuitBreaker, alertError } from './in
 import { calculateNetProfit } from './core/bidMath';
 import { validateOpportunity } from './core/filters';
 import { submitBundleWithFailover } from './core/bundleSubmitter';
-import { encodeTriangularPath, findTriangularOpportunities } from './core/triangularFinder';
+import { encode2HopPath, findTriangularOpportunities } from './core/triangularFinder';
 import CONFIG, { usdcToUsd, weiToEth } from './config/constants';
 
 const envFile = process.env.NODE_ENV === 'production' ? '.env.mainnet' : '.env.testnet';
@@ -77,7 +77,7 @@ async function main() {
 
   const apexContract = new ethers.Contract(
     CONFIG.APEX_FLASH_LOAN,
-    ['function executeArbitrage(address tokenBorrow, uint256 amount, address dexBuy, address dexSell, bytes calldata path) external'],
+    ['function executeArbitrage(address flashToken, uint256 flashAmount, address uniV3Router, bytes calldata path, uint256 minAmountOut) external'],
     wallet
   );
 
@@ -226,10 +226,11 @@ async function scanPair(
     const out3000: bigint = rawFee3000?.[0] ?? 0n;
     const out500:  bigint = rawFee500?.[0]  ?? 0n;
 
-    const [buyOnDex, sellOnDex, buyRouter, sellRouter, tokenOutBought, buyFee, sellFee] =
-      out3000 >= out500
-        ? ['uni-3000', 'uni-500',  CONFIG.UNI_ROUTER, CONFIG.SUSHI_ROUTER, out3000, 3000, 500]
-        : ['uni-500',  'uni-3000', CONFIG.SUSHI_ROUTER, CONFIG.UNI_ROUTER, out500,  500,  3000];
+    const [buyFee, sellFee, tokenOutBought] =
+      out3000 >= out500 ? [3000, 500, out3000] : [500, 3000, out500];
+    const [buyOnDex, sellOnDex, buyRouter, sellRouter] = [
+      `uni-${buyFee}`, `uni-${sellFee}`, CONFIG.UNI_ROUTER, CONFIG.UNI_ROUTER,
+    ];
 
     if ((tokenOutBought as bigint) === 0n) return false;
 
@@ -285,9 +286,8 @@ async function scanPair(
       return true;
     }
 
-    const path = encodeTriangularPath(
-      [pair.tokenIn, pair.tokenOut, pair.tokenIn] as [string, string, string],
-      [buyFee as number, sellFee as number, buyFee as number]
+    const path = encode2HopPath(
+      pair.tokenIn, buyFee as number, pair.tokenOut, sellFee as number, pair.tokenIn
     );
 
     return executeArbitrage(provider, wallet, apexContract, {
@@ -310,8 +310,10 @@ async function executeArbitrage(
   params:       TradeParams
 ): Promise<boolean> {
   try {
+    // minAmountOut: require at least MIN_PROFIT_BPS above the loan back (sandwich guard)
+    const minAmountOut = (params.amountIn * BigInt(10000 + CONFIG.MIN_PROFIT_BPS)) / 10000n;
     const tx = await apexContract.executeArbitrage.populateTransaction(
-      params.tokenIn, params.amountIn, params.buyRouter, params.sellRouter, params.path
+      params.tokenIn, params.amountIn, CONFIG.UNI_ROUTER, params.path, minAmountOut
     );
 
     tx.from                = wallet.address;

@@ -22,8 +22,12 @@ interface PathTemplate {
 
 const PATH_TEMPLATES: PathTemplate[] = [
   { tokens: [CONFIG.USDC, CONFIG.WETH, CONFIG.USDT], fees: [3000, 3000, 3000], description: 'USDC→WETH→USDT→USDC' },
-  { tokens: [CONFIG.USDC, CONFIG.USDT, CONFIG.WETH], fees: [500,  3000, 3000], description: 'USDC→USDT→WETH→USDC' },
+  { tokens: [CONFIG.USDC, CONFIG.WETH, CONFIG.USDT], fees: [500,  500,  100],  description: 'USDC→WETH→USDT→USDC (low fee)' },
+  { tokens: [CONFIG.USDC, CONFIG.USDT, CONFIG.WETH], fees: [100,  3000, 3000], description: 'USDC→USDT→WETH→USDC' },
   { tokens: [CONFIG.USDC, CONFIG.WETH, CONFIG.DAI],  fees: [3000, 3000, 500],  description: 'USDC→WETH→DAI→USDC'  },
+  { tokens: [CONFIG.USDC, CONFIG.DAI,  CONFIG.WETH], fees: [500,  3000, 3000], description: 'USDC→DAI→WETH→USDC'  },
+  { tokens: [CONFIG.USDC, CONFIG.USDT, CONFIG.DAI],  fees: [100,  500,  500],  description: 'USDC→USDT→DAI→USDC'  },
+  { tokens: [CONFIG.USDC, CONFIG.WETH, CONFIG.USDT], fees: [500,  3000, 100],  description: 'USDC→WETH→USDT→USDC (mixed)' },
 ];
 
 const QUOTER_ABI = [
@@ -115,14 +119,31 @@ async function simulateTriangularCycle(
   };
 }
 
+// 3-hop triangular path that closes back to tokens[0]:
+// tokens[0] → tokens[1] → tokens[2] → tokens[0]
 export function encodeTriangularPath(
   tokens: [string, string, string],
   fees:   [number, number, number]
 ): string {
   return ethers.solidityPacked(
-    ['address', 'uint24', 'address', 'uint24', 'address'],
-    [tokens[0], fees[0], tokens[1], fees[1], tokens[2]]
+    ['address', 'uint24', 'address', 'uint24', 'address', 'uint24', 'address'],
+    [tokens[0], fees[0], tokens[1], fees[1], tokens[2], fees[2], tokens[0]]
   );
 }
 
-export default { findTriangularOpportunities, encodeTriangularPath };
+// 2-hop round-trip path for single-pair cross-fee-tier arb:
+// tokenIn → tokenMid → tokenIn
+export function encode2HopPath(
+  tokenIn:  string,
+  feeBuy:   number,
+  tokenMid: string,
+  feeSell:  number,
+  tokenOut: string
+): string {
+  return ethers.solidityPacked(
+    ['address', 'uint24', 'address', 'uint24', 'address'],
+    [tokenIn, feeBuy, tokenMid, feeSell, tokenOut]
+  );
+}
+
+export default { findTriangularOpportunities, encodeTriangularPath, encode2HopPath };

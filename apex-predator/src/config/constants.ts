@@ -115,7 +115,7 @@ export const CONFIG = {
   GAS_FORECAST_CACHE_MS: 12_000,
   BLACKLIST_REFRESH_MS: 300_000,
 
-  FLASH_LOAN_FEE_BPS: 5,
+  FLASH_LOAN_FEE_BPS: 0,  // Balancer V2 charges 0% — no fee deduction needed
 
   TELEGRAM_MIN_PROFIT_USD:    5,
   TELEGRAM_ALERT_COOLDOWN_MS: 60_000,
