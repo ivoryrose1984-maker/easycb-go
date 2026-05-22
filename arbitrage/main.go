@@ -19,6 +19,7 @@ import (
 	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/arbitrage"
 	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/dex"
 	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/flashloan"
+	arbtypes "github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/types"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -108,13 +109,16 @@ func main() {
 	exec := arbitrage.NewExecutor(cfg, flExec, nextClient(), logger)
 
 	// ── Gas cost estimate in USDC micro-units ────────────────────────────────
-	// 250_000 gas × ~0.01 gwei base fee on Base × $3000/ETH ≈ $0.0075
+	// 600_000 gas × ~0.01 gwei base fee on Base × $3000/ETH ≈ $0.018
 	// Use a conservative $0.05 = 50_000 USDC units as the gas cost floor.
 	gasCostBase := big.NewInt(50_000)
 
 	minProfit := big.NewInt(cfg.MinProfitUSDC)
-	// Default flash loan: $1000 USDC
-	amountIn := new(big.Int).Mul(big.NewInt(1_000), big.NewInt(1_000_000))
+
+	// Loan size range for ternary search: $1K → $100K
+	// Gas is ~$0.05 fixed — profit scales linearly with loan size until slippage bites.
+	loanMin := new(big.Int).Mul(big.NewInt(1_000),   big.NewInt(1_000_000))
+	loanMax := new(big.Int).Mul(big.NewInt(100_000), big.NewInt(1_000_000))
 
 	// ── Main scan loop ───────────────────────────────────────────────────────
 	ticker := time.NewTicker(cfg.ScanInterval)
@@ -123,7 +127,7 @@ func main() {
 	var scanCount uint64
 	logger.Info("bot LIVE — scanning for profitable cycles",
 		zap.String("base_token", "USDC"),
-		zap.String("amount_in", "$1000"),
+		zap.String("loan_range", "$1K–$100K (ternary optimized)"),
 		zap.Int64("min_profit_usdc_units", cfg.MinProfitUSDC),
 	)
 
@@ -158,8 +162,9 @@ func main() {
 				time.Sleep(jitter)
 			}
 
+			// Find cycles at min loan first (fast probe)
 			scanCtx, done := context.WithTimeout(ctx, 4*time.Second)
-			cycles, err := detector.FindCycles(scanCtx, dex.BaseTokens.USDC, amountIn, gasCostBase, minProfit)
+			cycles, err := detector.FindCycles(scanCtx, dex.BaseTokens.USDC, loanMin, gasCostBase, minProfit)
 			done()
 
 			if err != nil {
@@ -170,15 +175,31 @@ func main() {
 				continue
 			}
 
-			logger.Info("cycles found", zap.Int("count", len(cycles)),
-				zap.String("best_pnl", cycles[0].NetPnLUSDC.String()))
+			// Best cycle confirmed at $1K — find optimal loan size via ternary search
+			bestCycle := cycles[0]
+			optimalLoan := findOptimalLoanSize(ctx, detector, bestCycle, loanMin, loanMax, gasCostBase, minProfit)
+			if optimalLoan.Cmp(loanMin) > 0 {
+				// Re-simulate at optimal size to get accurate steps and PnL
+				optCtx, optDone := context.WithTimeout(ctx, 4*time.Second)
+				optCycles, optErr := detector.FindCycles(optCtx, dex.BaseTokens.USDC, optimalLoan, gasCostBase, minProfit)
+				optDone()
+				if optErr == nil && len(optCycles) > 0 {
+					bestCycle = optCycles[0]
+				}
+			}
+
+			logger.Info("executing best cycle",
+				zap.String("path", bestCycle.Tokens[0].Symbol+"→"+bestCycle.Tokens[1].Symbol+"→"+bestCycle.Tokens[2].Symbol),
+				zap.String("loan", bestCycle.AmountIn.String()),
+				zap.String("net_pnl", bestCycle.NetPnLUSDC.String()),
+			)
 
 			// Execute only the best cycle per scan to avoid nonce conflicts
-			execCtx, done := context.WithTimeout(ctx, 10*time.Second)
-			if err := exec.Execute(execCtx, cycles[0]); err != nil {
+			execCtx, execDone := context.WithTimeout(ctx, 10*time.Second)
+			if err := exec.Execute(execCtx, bestCycle); err != nil {
 				logger.Error("execution error", zap.Error(err))
 			}
-			done()
+			execDone()
 		}
 	}
 }
@@ -191,4 +212,53 @@ func buildLogger(level string) *zap.Logger {
 	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	l, _ := cfg.Build()
 	return l
+}
+
+// findOptimalLoanSize uses ternary search (6 iterations) to find the loan size that
+// maximises NetPnLUSDC for a given cycle path. Returns loanMin if no improvement found.
+func findOptimalLoanSize(
+	ctx context.Context,
+	detector *arbitrage.Detector,
+	sample *arbtypes.Cycle,
+	loanMin, loanMax, gasCost, minProfit *big.Int,
+) *big.Int {
+	tokens := [3]common.Address{
+		sample.Tokens[0].Address,
+		sample.Tokens[1].Address,
+		sample.Tokens[2].Address,
+	}
+
+	bestPnL := func(size *big.Int) *big.Int {
+		tCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		cycles, err := detector.FindCycles(tCtx, tokens[0], size, gasCost, minProfit)
+		if err != nil || len(cycles) == 0 {
+			return new(big.Int)
+		}
+		// find the cycle matching our token path
+		for _, c := range cycles {
+			if c.Tokens[1].Address == tokens[1] && c.Tokens[2].Address == tokens[2] {
+				return c.NetPnLUSDC
+			}
+		}
+		return cycles[0].NetPnLUSDC
+	}
+
+	lo := new(big.Int).Set(loanMin)
+	hi := new(big.Int).Set(loanMax)
+	for i := 0; i < 6; i++ {
+		span := new(big.Int).Sub(hi, lo)
+		m1 := new(big.Int).Add(lo, new(big.Int).Div(span, big.NewInt(3)))
+		m2 := new(big.Int).Sub(hi, new(big.Int).Div(span, big.NewInt(3)))
+		if bestPnL(m1).Cmp(bestPnL(m2)) >= 0 {
+			hi = m2
+		} else {
+			lo = m1
+		}
+	}
+	optimal := new(big.Int).Div(new(big.Int).Add(lo, hi), big.NewInt(2))
+	if optimal.Cmp(loanMin) < 0 {
+		return loanMin
+	}
+	return optimal
 }

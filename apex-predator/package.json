@@ -6,20 +6,23 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/ApexPredator.js",
-    "dev":   "npm run build && npm start",
-    "test":  "echo 'Run per TESTING_FRAMEWORK.md'"
+    "dev": "npm run build && npm start",
+    "test": "jest --runInBand"
   },
   "dependencies": {
     "@flashbots/ethers-provider-bundle": "^1.0.0",
-    "@supabase/supabase-js":            "^2.39.0",
-    "dotenv":                           "^16.3.1",
-    "ethers":                           "^6.9.0",
-    "node-telegram-bot-api":            "^0.64.0"
+    "@supabase/supabase-js": "^2.39.0",
+    "dotenv": "^16.3.1",
+    "ethers": "^6.9.0",
+    "node-telegram-bot-api": "^0.64.0"
   },
   "devDependencies": {
-    "@types/node":                      "^20.10.6",
-    "@types/node-telegram-bot-api":     "^0.64.0",
-    "typescript":                       "^5.3.3"
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.10.6",
+    "@types/node-telegram-bot-api": "^0.64.0",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.11",
+    "typescript": "^5.3.3"
   },
   "engines": {
     "node": ">=18.0.0"

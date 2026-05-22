@@ -5,7 +5,7 @@ import { createWsProvider } from './infrastructure/wsProvider';
 import { initSupabase, logOpportunity, logTrade } from './infrastructure/supabaseLogger';
 import { getGasForecast } from './infrastructure/gasForecaster';
 import { initTelegram, alertProfit, alertCircuitBreaker, alertError } from './infrastructure/telegramAlert';
-import { calculateNetProfit } from './core/bidMath';
+import { calculateNetProfit, findOptimalLoanSize } from './core/bidMath';
 import { validateOpportunity } from './core/filters';
 import { submitBundleWithFailover } from './core/bundleSubmitter';
 import { encode2HopPath, findTriangularOpportunities } from './core/triangularFinder';
@@ -208,52 +208,91 @@ async function scanPair(
   ethPrice:     bigint
 ): Promise<boolean> {
   try {
-    const amountIn = CONFIG.MIN_LOAN_USDC;
+    // Quick probe at minimum size across ALL fee tiers to find best buy/sell combination
+    const probe = CONFIG.MIN_LOAN_USDC;
+    const FEE_TIERS = [100, 500, 3000, 10000];
 
-    const [rawFee3000, rawFee500] = await Promise.all([
+    const buyQuotes = await Promise.all(FEE_TIERS.map(fee =>
       quoter.quoteExactInputSingle.staticCall({
         tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
-        amountIn, fee: 3000, sqrtPriceLimitX96: 0,
-      }).catch(() => null),
+        amountIn: probe, fee, sqrtPriceLimitX96: 0,
+      }).catch(() => null)
+    ));
+
+    // Best buy = most tokenOut per USDC in
+    let buyFee = FEE_TIERS[0], bestBuyOut = 0n;
+    for (let i = 0; i < FEE_TIERS.length; i++) {
+      const out: bigint = buyQuotes[i]?.[0] ?? 0n;
+      if (out > bestBuyOut) { bestBuyOut = out; buyFee = FEE_TIERS[i]; }
+    }
+    if (bestBuyOut === 0n) return false;
+
+    // Best sell = most tokenIn back (from a DIFFERENT fee tier — that's where the arb lives)
+    const sellQuotes = await Promise.all(FEE_TIERS.filter(f => f !== buyFee).map(fee =>
       quoter.quoteExactInputSingle.staticCall({
-        tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
-        amountIn, fee: 500, sqrtPriceLimitX96: 0,
-      }).catch(() => null),
-    ]);
+        tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
+        amountIn: bestBuyOut, fee, sqrtPriceLimitX96: 0,
+      }).catch(() => null)
+    ));
+    const sellFeeTiers = FEE_TIERS.filter(f => f !== buyFee);
 
-    if (!rawFee3000 && !rawFee500) return false;
+    let sellFee = sellFeeTiers[0], bestSellOut = 0n;
+    for (let i = 0; i < sellFeeTiers.length; i++) {
+      const out: bigint = sellQuotes[i]?.[0] ?? 0n;
+      if (out > bestSellOut) { bestSellOut = out; sellFee = sellFeeTiers[i]; }
+    }
+    if (bestSellOut === 0n) return false;
 
-    const out3000: bigint = rawFee3000?.[0] ?? 0n;
-    const out500:  bigint = rawFee500?.[0]  ?? 0n;
-
-    const [buyFee, sellFee, tokenOutBought] =
-      out3000 >= out500 ? [3000, 500, out3000] : [500, 3000, out500];
     const [buyOnDex, sellOnDex, buyRouter, sellRouter] = [
       `uni-${buyFee}`, `uni-${sellFee}`, CONFIG.UNI_ROUTER, CONFIG.UNI_ROUTER,
     ];
 
-    if ((tokenOutBought as bigint) === 0n) return false;
-
-    const sellRaw = await quoter.quoteExactInputSingle.staticCall({
-      tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
-      amountIn: tokenOutBought, fee: sellFee as number, sqrtPriceLimitX96: 0,
-    }).catch(() => null);
-    if (!sellRaw) return false;
-
-    const tokenInReceived: bigint = sellRaw[0];
-    const spreadBps = amountIn > 0n
-      ? Number(((tokenInReceived - amountIn) * 10_000n) / amountIn)
+    const probeReceived = bestSellOut;
+    const spreadBps = probe > 0n
+      ? Number(((probeReceived - probe) * 10_000n) / probe)
       : 0;
 
+    if (spreadBps < CONFIG.MIN_PROFIT_BPS) return false; // no spread, skip size search
+
     const validation = await validateOpportunity(
-      provider, pair.tokenIn, pair.tokenOut, amountIn, spreadBps, ethPrice
+      provider, pair.tokenIn, pair.tokenOut, probe, spreadBps, ethPrice
     );
     if (!validation.valid) {
       if (CONFIG.LOG_LEVEL === 'debug') console.log(`[FILTER] ${pair.name}: ${validation.reason}`);
       return false;
     }
 
-    const profitResult = calculateNetProfit(amountIn, tokenOutBought as bigint, tokenInReceived, gasForecast, ethPrice);
+    // Spread confirmed — find optimal loan size via ternary search (8 iterations, $1K–$100K)
+    const { optimalAmount: amountIn, maxProfit: profitResult } = await findOptimalLoanSize(
+      async (size) => {
+        const bRaw = await quoter.quoteExactInputSingle.staticCall({
+          tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
+          amountIn: size, fee: buyFee, sqrtPriceLimitX96: 0,
+        }).catch(() => null);
+        if (!bRaw) return calculateNetProfit(size, 0n, 0n, gasForecast, ethPrice);
+        const midOut: bigint = bRaw[0];
+        const sRaw = await quoter.quoteExactInputSingle.staticCall({
+          tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
+          amountIn: midOut, fee: sellFee, sqrtPriceLimitX96: 0,
+        }).catch(() => null);
+        return calculateNetProfit(size, midOut, sRaw?.[0] ?? 0n, gasForecast, ethPrice);
+      }
+    );
+
+    // Re-fetch final quotes at optimal size for execution
+    const finalBuyRaw = await quoter.quoteExactInputSingle.staticCall({
+      tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
+      amountIn, fee: buyFee, sqrtPriceLimitX96: 0,
+    }).catch(() => null);
+    if (!finalBuyRaw) return false;
+    const tokenOutBought: bigint = finalBuyRaw[0];
+
+    const finalSellRaw = await quoter.quoteExactInputSingle.staticCall({
+      tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
+      amountIn: tokenOutBought, fee: sellFee, sqrtPriceLimitX96: 0,
+    }).catch(() => null);
+    if (!finalSellRaw) return false;
+    const tokenInReceived: bigint = finalSellRaw[0];
 
     logOpportunity({
       block_number:          await provider.getBlockNumber(),

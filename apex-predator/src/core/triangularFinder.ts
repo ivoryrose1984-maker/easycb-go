@@ -121,18 +121,21 @@ async function simulateTriangularCycle(
 
 // 3-hop triangular path that closes back to tokens[0]:
 // tokens[0] → tokens[1] → tokens[2] → tokens[0]
+// Uses getAddress() to normalise EIP-55 checksums — ethers v6 solidityPacked requires them.
 export function encodeTriangularPath(
   tokens: [string, string, string],
   fees:   [number, number, number]
 ): string {
+  // Normalise via lowercase → EIP-55 to tolerate any input casing
+  const [t0, t1, t2] = tokens.map(t => ethers.getAddress(t.toLowerCase()));
   return ethers.solidityPacked(
     ['address', 'uint24', 'address', 'uint24', 'address', 'uint24', 'address'],
-    [tokens[0], fees[0], tokens[1], fees[1], tokens[2], fees[2], tokens[0]]
+    [t0, fees[0], t1, fees[1], t2, fees[2], t0]
   );
 }
 
 // 2-hop round-trip path for single-pair cross-fee-tier arb:
-// tokenIn → tokenMid → tokenIn
+// tokenIn → tokenMid → tokenOut
 export function encode2HopPath(
   tokenIn:  string,
   feeBuy:   number,
@@ -140,9 +143,10 @@ export function encode2HopPath(
   feeSell:  number,
   tokenOut: string
 ): string {
+  const [a, b, c] = [tokenIn, tokenMid, tokenOut].map(t => ethers.getAddress(t.toLowerCase()));
   return ethers.solidityPacked(
     ['address', 'uint24', 'address', 'uint24', 'address'],
-    [tokenIn, feeBuy, tokenMid, feeSell, tokenOut]
+    [a, feeBuy, b, feeSell, c]
   );
 }
 
