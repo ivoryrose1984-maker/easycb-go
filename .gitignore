@@ -21,8 +21,34 @@
 go.work
 go.work.sum
 
-# env file
+# env files — never commit real credentials
 .env
+.env.local
+.env.mainnet
+.env.production
+apex-predator/.env
+arbitrage/.env
+dashboard/.env
+dashboard/.env.local
+
+# Built binaries
+arbitrage/arb-bot
+apex-predator/dist/
+
+# Logs
+logs/
+*.log
+
+# Node
+node_modules/
+dashboard/node_modules/
+apex-predator/node_modules/
+dashboard/.next/
+
+# Go
+go.work
+go.work.sum
+go.sum
 
 /.idea
-go.sum
+.DS_Store
