@@ -19,6 +19,7 @@ import (
 	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/arbitrage"
 	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/dex"
 	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/flashloan"
+	arblogger "github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/logger"
 	arbtypes "github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/types"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -130,6 +131,7 @@ func main() {
 		zap.String("loan_range", "$1K–$100K (ternary optimized)"),
 		zap.Int64("min_profit_usdc_units", cfg.MinProfitUSDC),
 	)
+	arblogger.TelegramStartup()
 
 	for {
 		select {
