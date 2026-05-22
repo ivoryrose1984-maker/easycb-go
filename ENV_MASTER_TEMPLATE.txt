@@ -1,0 +1,55 @@
+═══════════════════════════════════════════════════════════════
+  ARB BOT — MASTER ENVIRONMENT VARIABLES
+  Save this file in Bitwarden as a Secure Note.
+  Fill in every value marked ← FILL THIS IN
+═══════════════════════════════════════════════════════════════
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ TS BOT  →  apex-predator/.env
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ALCHEMY_WSS_URL=wss://base-mainnet.g.alchemy.com/v2/← FILL THIS IN
+PRIVATE_KEY=0x← FILL THIS IN (64 hex chars from MetaMask)
+CHAIN_ID=8453
+APEX_FLASH_LOAN_BASE=0x← FILL THIS IN (after Remix deploy)
+DRY_RUN=true
+NODE_ENV=production
+TELEGRAM_BOT_TOKEN=← FILL THIS IN
+TELEGRAM_CHAT_ID=← FILL THIS IN
+SUPABASE_URL=https://← FILL THIS IN.supabase.co
+SUPABASE_ANON_KEY=← FILL THIS IN
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ GO BOT  →  arbitrage/.env
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ARB_PRIVATE_KEY=0x← FILL THIS IN (same key as above)
+ARB_RPC_URLS=https://base-mainnet.g.alchemy.com/v2/← FILL THIS IN
+ARB_FLASH_LOAN_CONTRACT=0x← FILL THIS IN (after Remix deploy)
+ARB_DRY_RUN=true
+ARB_MIN_PROFIT_USDC=5000000
+ARB_MAX_GAS_GWEI=5.0
+ARB_SCAN_INTERVAL=500ms
+ARB_LOG_LEVEL=info
+ARB_TELEGRAM_BOT_TOKEN=← FILL THIS IN (same as above)
+ARB_TELEGRAM_CHAT_ID=← FILL THIS IN (same as above)
+ARB_SUPABASE_URL=https://← FILL THIS IN.supabase.co
+ARB_SUPABASE_KEY=← FILL THIS IN (service role key, NOT anon)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ DASHBOARD  →  dashboard/.env.local
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+NEXT_PUBLIC_SUPABASE_URL=https://← FILL THIS IN.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=← FILL THIS IN
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ CONTRACT ADDRESSES (fill in after Remix deployment)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TS Bot Contract  (ApexFlashLoan.sol):  0x← FILL AFTER DEPLOY
+Go Bot Contract  (FlashLoan.sol):      0x← FILL AFTER DEPLOY
+Tax Wallet Address:                    0x← FILL THIS IN
+Operator Wallet Address:               0x← FILL THIS IN
+
+═══════════════════════════════════════════════════════════════
