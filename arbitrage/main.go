@@ -226,11 +226,27 @@ func main() {
 				}
 			}
 
+			// Stamp quote freshness immediately after simulation completes.
+			quotedBest := &arbitrage.QuotedCycle{Cycle: bestCycle, QuotedAt: time.Now()}
+
 			logger.Info("executing best cycle",
 				zap.String("path", bestCycle.Tokens[0].Symbol+"→"+bestCycle.Tokens[1].Symbol+"→"+bestCycle.Tokens[2].Symbol),
 				zap.String("loan", bestCycle.AmountIn.String()),
 				zap.String("net_pnl", bestCycle.NetPnLUSDC.String()),
 			)
+
+			// Reject stale quotes — a new block may have shifted prices.
+			if !quotedBest.IsFresh() {
+				logger.Warn("quote stale, skipping execution",
+					zap.Int64("age_ms", quotedBest.AgeMs()),
+				)
+				continue
+			}
+			if quotedBest.IsWarnAge() {
+				logger.Warn("quote near expiry, proceeding with caution",
+					zap.Int64("age_ms", quotedBest.AgeMs()),
+				)
+			}
 
 			// Execute only the best cycle per scan to avoid nonce conflicts
 			execCtx, execDone := context.WithTimeout(ctx, 10*time.Second)

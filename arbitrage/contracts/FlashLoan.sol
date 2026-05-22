@@ -4,6 +4,11 @@ pragma solidity ^0.8.19;
 // filepath: contracts/FlashLoan.sol
 // Deploy to Base mainnet. Uses Balancer V2 flash loans (0% fee).
 // Profit is automatically split: taxBps% → taxWallet, remainder → owner.
+//
+// Hardening: inline reentrancy guard, pausable, approve-zero-first, configurable
+// min profit, balance-based profit calculation, full NatSpec.
+
+// ─── Interfaces ──────────────────────────────────────────────────────────────
 
 interface IERC20 {
     function approve(address spender, uint256 amount) external returns (bool);
@@ -50,43 +55,103 @@ interface IAerodromeRouter {
     ) external returns (uint256[] memory amounts);
 }
 
+// ─── Contract ────────────────────────────────────────────────────────────────
+
 contract ApexFlashLoan {
-    // Balancer V2 Vault — same address on all networks
+
+    // ── Constants ─────────────────────────────────────────────────────────────
+
+    /// @notice Balancer V2 Vault — same address on all EVM networks.
     address public constant VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
 
+    // ── Immutables ────────────────────────────────────────────────────────────
+
+    /// @notice Contract owner; set once at deployment, never changes.
     address public immutable owner;
 
-    // ─── Profit split ────────────────────────────────────────────────────────
-    address public taxWallet;
-    uint256 public taxBps;  // e.g. 3000 = 30%, max 5000
+    // ── Reentrancy guard ──────────────────────────────────────────────────────
 
+    /// @dev 1 = not entered, 2 = entered. Avoids extra SLOAD via bool reset trick.
+    uint256 private _status = 1;
+
+    // ── Pausable ──────────────────────────────────────────────────────────────
+
+    /// @notice When true, `executeArbitrage` and `receiveFlashLoan` revert.
+    bool public paused;
+
+    // ── Profit split ──────────────────────────────────────────────────────────
+
+    /// @notice Address that receives `taxBps` / 10 000 of every profit.
+    address public taxWallet;
+
+    /// @notice Basis points sent to taxWallet (e.g. 3000 = 30%).  Max 5000.
+    uint256 public taxBps;
+
+    // ── Min profit ────────────────────────────────────────────────────────────
+
+    /// @notice Minimum net profit required before payout (in flash-token decimals).
+    ///         Defaults to 1 000 (= 0.001 USDC with 6 decimals).  Owner-configurable.
+    uint256 public minProfitUsdc = 1_000;
+
+    // ── Swap step ─────────────────────────────────────────────────────────────
+
+    /// @notice Describes one leg of the arbitrage route.
+    /// @dev    `uniV3Fee > 0` → Uniswap V3 exactInputSingle.
+    ///         `uniV3Fee == 0` → Aerodrome swapExactTokensForTokens.
     struct SwapStep {
-        address dexRouter;
-        address tokenIn;
-        address tokenOut;
-        uint24  uniV3Fee;     // > 0 = Uniswap V3; 0 = Aerodrome
-        bool    aeroStable;
-        address aeroFactory;
-        uint256 minAmountOut;
+        address dexRouter;    ///< DEX router address for this hop.
+        address tokenIn;      ///< Input token for this hop.
+        address tokenOut;     ///< Output token for this hop.
+        uint24  uniV3Fee;     ///< Pool fee tier (500/3000/10000); 0 = Aerodrome.
+        bool    aeroStable;   ///< Aerodrome stable-pool flag (ignored for UniV3).
+        address aeroFactory;  ///< Aerodrome pool factory (ignored for UniV3).
+        uint256 minAmountOut; ///< Minimum tokens out from this hop (slippage guard).
     }
 
-    event ArbitrageExecuted(address indexed token, uint256 amountIn, uint256 profit, uint256 taxAmount);
+    // ── Events ────────────────────────────────────────────────────────────────
+
+    event ArbitrageExecuted(
+        address indexed token,
+        uint256 amountIn,
+        uint256 profit,
+        uint256 taxAmount
+    );
     event SplitUpdated(address taxWallet, uint256 taxBps);
+    event PausedStateChanged(bool paused);
+    event MinProfitUpdated(uint256 minProfit);
+    event EmergencyWithdraw(address indexed token, uint256 amount, address indexed to);
+
+    // ── Modifiers ─────────────────────────────────────────────────────────────
 
     modifier onlyOwner() {
         require(msg.sender == owner, "Not owner");
         _;
     }
 
+    /// @dev Inline CEI-style reentrancy guard (no OpenZeppelin dependency).
+    modifier nonReentrant() {
+        require(_status != 2, "Reentrant call");
+        _status = 2;
+        _;
+        _status = 1;
+    }
+
+    modifier whenNotPaused() {
+        require(!paused, "Paused");
+        _;
+    }
+
+    // ── Constructor ───────────────────────────────────────────────────────────
+
     constructor() {
         owner = msg.sender;
     }
 
-    // ─── Configure profit split ───────────────────────────────────────────────
+    // ─── Admin — profit split ─────────────────────────────────────────────────
 
-    /// @notice Set the tax wallet and percentage. Call once after deployment.
+    /// @notice Set the tax wallet and percentage.  Call once after deployment.
     /// @param _taxWallet  Address that receives the tax portion of every profit.
-    /// @param _taxBps     Basis points (3000 = 30%, max 5000).
+    /// @param _taxBps     Basis points to send to taxWallet (3000 = 30%, max 5000).
     function setSplit(address _taxWallet, uint256 _taxBps) external onlyOwner {
         require(_taxWallet != address(0), "Zero address");
         require(_taxBps <= 5000, "Max 50%");
@@ -95,17 +160,41 @@ contract ApexFlashLoan {
         emit SplitUpdated(_taxWallet, _taxBps);
     }
 
-    // ─── External entry point ────────────────────────────────────────────────
+    // ─── Admin — pausable ─────────────────────────────────────────────────────
+
+    /// @notice Pause or unpause arbitrage execution.
+    /// @param _paused  True to pause; false to unpause.
+    function setPaused(bool _paused) external onlyOwner {
+        paused = _paused;
+        emit PausedStateChanged(_paused);
+    }
+
+    // ─── Admin — min profit ───────────────────────────────────────────────────
+
+    /// @notice Update the minimum net profit threshold.
+    /// @param _min  Minimum profit in flash-token base units.
+    function setMinProfit(uint256 _min) external onlyOwner {
+        minProfitUsdc = _min;
+        emit MinProfitUpdated(_min);
+    }
+
+    // ─── External entry point ─────────────────────────────────────────────────
 
     /// @notice Called by the Go bot to initiate a flash-loan-funded arbitrage.
-    /// @param flashToken  The token to borrow (e.g. USDC).
-    /// @param flashAmount How much to borrow.
-    /// @param steps       The 3-hop swap path encoded as SwapStep[].
+    ///         The entire round-trip (borrow → swap[] → repay → split) is atomic.
+    /// @param flashToken   The token to borrow (e.g. USDC on Base).
+    /// @param flashAmount  How much to borrow (in token base units).
+    /// @param steps        Ordered swap hops; first tokenIn must equal flashToken,
+    ///                     last tokenOut must equal flashToken.
     function executeArbitrage(
         address flashToken,
         uint256 flashAmount,
         SwapStep[] calldata steps
-    ) external onlyOwner {
+    ) external onlyOwner nonReentrant whenNotPaused {
+        require(flashToken != address(0), "Zero token");
+        require(flashAmount > 0, "Zero amount");
+        require(steps.length > 0, "No steps");
+
         address[] memory tokens  = new address[](1);
         uint256[] memory amounts = new uint256[](1);
         tokens[0]  = flashToken;
@@ -115,52 +204,87 @@ contract ApexFlashLoan {
         IBalancerVault(VAULT).flashLoan(address(this), tokens, amounts, userData);
     }
 
-    // ─── Balancer flash loan callback ────────────────────────────────────────
+    // ─── Balancer flash loan callback ─────────────────────────────────────────
 
+    /// @notice Called by the Balancer Vault after transferring the flash loan.
+    ///         Executes each swap hop, repays the loan, and splits the profit.
+    ///         Reverts if profit is below `minProfitUsdc`.
+    /// @dev Only callable by the Balancer Vault.  Protected by reentrancy guard
+    ///      and pause switch.  Approve-zero-first pattern applied per hop.
     function receiveFlashLoan(
-        address[] memory,
+        address[] memory tokens,
         uint256[] memory amounts,
-        uint256[] memory,
+        uint256[] memory,          // feeAmounts — always 0 on Balancer V2
         bytes memory userData
-    ) external {
+    ) external nonReentrant whenNotPaused {
+        // ── Caller validation ────────────────────────────────────────────────
         require(msg.sender == VAULT, "Only Balancer Vault");
+
+        // ── Payload validation ───────────────────────────────────────────────
+        require(tokens.length == 1,  "Single token only");
+        require(amounts.length == 1, "Single amount only");
+        require(amounts[0] > 0,      "Zero amount");
 
         (SwapStep[] memory steps, uint256 flashAmount, address flashToken) =
             abi.decode(userData, (SwapStep[], uint256, address));
 
+        require(steps.length > 0, "No steps");
+
+        // ── Execute swap hops ────────────────────────────────────────────────
         uint256 current = amounts[0];
         for (uint256 i = 0; i < steps.length; i++) {
             current = _swap(steps[i], current);
         }
 
-        // Repay exactly what was borrowed (Balancer fee = 0)
+        // ── Balance-based profit calculation ─────────────────────────────────
+        // Re-read balance to catch fee-on-transfer tokens and any rounding.
+        uint256 finalBalance = IERC20(flashToken).balanceOf(address(this));
+        require(finalBalance >= flashAmount, "Cannot repay loan");
+        uint256 profit = finalBalance - flashAmount;
+        require(profit >= minProfitUsdc, "Below min profit");
+
+        // ── Repay Balancer (fee = 0) ─────────────────────────────────────────
         require(
             IERC20(flashToken).transfer(VAULT, flashAmount),
             "Repay failed"
         );
-
-        uint256 profit = current > flashAmount ? current - flashAmount : 0;
-        require(profit > 0, "No profit");
 
         // ── Auto profit split ────────────────────────────────────────────────
         uint256 taxAmount = 0;
         if (taxWallet != address(0) && taxBps > 0) {
             taxAmount = (profit * taxBps) / 10_000;
             if (taxAmount > 0) {
-                IERC20(flashToken).transfer(taxWallet, taxAmount);
+                require(
+                    IERC20(flashToken).transfer(taxWallet, taxAmount),
+                    "Tax transfer failed"
+                );
             }
         }
 
-        IERC20(flashToken).transfer(owner, profit - taxAmount);
+        require(
+            IERC20(flashToken).transfer(owner, profit - taxAmount),
+            "Owner transfer failed"
+        );
+
         emit ArbitrageExecuted(flashToken, flashAmount, profit, taxAmount);
     }
 
     // ─── Internal swap dispatcher ─────────────────────────────────────────────
 
+    /// @dev Executes one hop and returns the amount received.
+    ///      Applies approve-zero-first before every allowance grant.
     function _swap(SwapStep memory step, uint256 amountIn) internal returns (uint256) {
+        require(step.dexRouter != address(0), "Zero router");
+        require(step.tokenIn   != address(0), "Zero tokenIn");
+        require(step.tokenOut  != address(0), "Zero tokenOut");
+        require(amountIn > 0,                 "Zero amountIn");
+
+        // Approve zero first to prevent the ERC-20 approve race condition.
+        IERC20(step.tokenIn).approve(step.dexRouter, 0);
         IERC20(step.tokenIn).approve(step.dexRouter, amountIn);
 
         if (step.uniV3Fee > 0) {
+            // ── Uniswap V3 ──────────────────────────────────────────────────
             return IUniswapV3Router(step.dexRouter).exactInputSingle(
                 IUniswapV3Router.ExactInputSingleParams({
                     tokenIn:           step.tokenIn,
@@ -174,7 +298,7 @@ contract ApexFlashLoan {
             );
         }
 
-        // Aerodrome
+        // ── Aerodrome ────────────────────────────────────────────────────────
         IAerodromeRouter.Route[] memory routes = new IAerodromeRouter.Route[](1);
         routes[0] = IAerodromeRouter.Route({
             from:    step.tokenIn,
@@ -183,18 +307,28 @@ contract ApexFlashLoan {
             factory: step.aeroFactory
         });
         uint256[] memory outs = IAerodromeRouter(step.dexRouter).swapExactTokensForTokens(
-            amountIn, step.minAmountOut, routes, address(this), block.timestamp + 60
+            amountIn,
+            step.minAmountOut,
+            routes,
+            address(this),
+            block.timestamp + 60
         );
         return outs[outs.length - 1];
     }
 
-    // ─── Owner utilities ─────────────────────────────────────────────────────
+    // ─── Owner utilities ──────────────────────────────────────────────────────
 
-    function withdraw(address token) external onlyOwner {
+    /// @notice Rescue any ERC-20 token stuck in this contract.
+    ///         Transfers the full balance to the owner.
+    /// @param token  ERC-20 token address to rescue.
+    function withdraw(address token) external onlyOwner nonReentrant {
+        require(token != address(0), "Zero address");
         uint256 bal = IERC20(token).balanceOf(address(this));
         require(bal > 0, "Nothing to withdraw");
-        IERC20(token).transfer(owner, bal);
+        require(IERC20(token).transfer(owner, bal), "Transfer failed");
+        emit EmergencyWithdraw(token, bal, owner);
     }
 
+    /// @dev Accept ETH (e.g. from accidental transfers).
     receive() external payable {}
 }
