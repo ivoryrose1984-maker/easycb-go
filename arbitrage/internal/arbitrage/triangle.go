@@ -111,8 +111,10 @@ func (d *Detector) FindCycles(
 				if e3.Neighbor != baseToken {
 					continue
 				}
-				// Deduplicate: sort tokens to canonical key
-				key := cycleKey(baseToken, mid, end)
+				// Deduplicate by direction: (mid, end) pair is directionally unique
+				// since baseToken is constant. Do NOT sort — USDC→WETH→USDT and
+				// USDC→USDT→WETH are different cycles with different profitability.
+				key := mid.Hex() + end.Hex()
 				if seen[key] {
 					continue
 				}
@@ -219,21 +221,6 @@ func (d *Detector) simulateCycle(
 		GasCostEst: new(big.Int).Set(gasCostBase),
 		NetPnLUSDC: new(big.Int).Set(net),
 	}, nil
-}
-
-func cycleKey(a, b, c common.Address) string {
-	addrs := []string{a.Hex(), b.Hex(), c.Hex()}
-	// Simple canonical order
-	if addrs[1] < addrs[0] {
-		addrs[0], addrs[1] = addrs[1], addrs[0]
-	}
-	if addrs[2] < addrs[1] {
-		addrs[1], addrs[2] = addrs[2], addrs[1]
-	}
-	if addrs[1] < addrs[0] {
-		addrs[0], addrs[1] = addrs[1], addrs[0]
-	}
-	return addrs[0] + addrs[1] + addrs[2]
 }
 
 func sortCycles(cycles []*types.Cycle) {

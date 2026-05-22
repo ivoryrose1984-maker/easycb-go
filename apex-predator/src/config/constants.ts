@@ -8,7 +8,9 @@ const CHAIN_ID_ENV = parseInt(process.env.CHAIN_ID ?? '8453');
 const CHAIN_CONFIGS: Record<number, {
   UNI_FACTORY: string; UNI_QUOTER_V2: string; UNI_ROUTER: string;
   SUSHI_ROUTER: string; AAVE_POOL: string; APEX_FLASH_LOAN: string;
-  WETH: string; USDC: string; USDT: string; DAI: string; cbBTC?: string; cbETH?: string;
+  WETH: string; USDC: string; USDT: string; DAI: string;
+  cbBTC?: string; cbETH?: string;
+  AERO?: string; USDbC?: string; VIRTUAL?: string; BRETT?: string; TBTC?: string;
   GAS_ESTIMATE: bigint; MIN_PRIORITY_FEE_GWEI: bigint;
   BUILDERS: { name: string; url: string; enabled: boolean }[];
 }> = {
@@ -24,8 +26,13 @@ const CHAIN_CONFIGS: Record<number, {
     USDC:  '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
     USDT:  '0xfde4C96c8593536E31F0E8c0FFF4E4b5770B80EC',
     DAI:   '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb',
-    cbBTC: '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf',
-    cbETH: '0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22',
+    cbBTC:   '0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf',
+    cbETH:   '0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22',
+    AERO:    '0x940181a94A35A4569E4529A3CDfB74e38FD98631',
+    USDbC:   '0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA',
+    VIRTUAL: '0x0b3e328455c4059EEb9e3f84b5543F74E24e7020',
+    BRETT:   '0x532f27101965dd16442E59d40670FaF5eBB142E4',
+    TBTC:    '0x236aa50979D5f3De3Bd1Eeb40E81137F22ab794b',
     GAS_ESTIMATE:         250_000n,
     MIN_PRIORITY_FEE_GWEI:      1n,
     BUILDERS: [
