@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 // Deploy to Base (or Arbitrum). Uses Balancer V2 flash loans (0% fee).
 // Executes an arbitrary Uniswap V3 exactInput multi-hop path with borrowed funds.
 // Path must start and end with the same token (flashToken) so the loan can be repaid.
+// Profit is automatically split: taxBps% → taxWallet, remainder → owner.
 
 interface IERC20 {
     function approve(address spender, uint256 amount) external returns (bool);
@@ -36,7 +37,14 @@ contract ApexFlashLoan {
 
     address public immutable owner;
 
-    event ArbitrageExecuted(address indexed token, uint256 amountIn, uint256 profit);
+    // ─── Profit split ────────────────────────────────────────────────────────
+    // taxWallet receives taxBps/10000 of every profit automatically.
+    // Set once after deployment via setSplit(). Max 50% enforced.
+    address public taxWallet;
+    uint256 public taxBps;  // e.g. 3000 = 30%
+
+    event ArbitrageExecuted(address indexed token, uint256 amountIn, uint256 profit, uint256 taxAmount);
+    event SplitUpdated(address taxWallet, uint256 taxBps);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "Not owner");
@@ -45,6 +53,19 @@ contract ApexFlashLoan {
 
     constructor() {
         owner = msg.sender;
+    }
+
+    // ─── Configure profit split ───────────────────────────────────────────────
+
+    /// @notice Set the tax wallet and percentage. Call once after deployment.
+    /// @param _taxWallet  Address that receives the tax portion of every profit.
+    /// @param _taxBps     Basis points to send to taxWallet (3000 = 30%, max 5000).
+    function setSplit(address _taxWallet, uint256 _taxBps) external onlyOwner {
+        require(_taxWallet != address(0), "Zero address");
+        require(_taxBps <= 5000, "Max 50%");
+        taxWallet = _taxWallet;
+        taxBps    = _taxBps;
+        emit SplitUpdated(_taxWallet, _taxBps);
     }
 
     // ─── External entry point ────────────────────────────────────────────────
@@ -77,7 +98,7 @@ contract ApexFlashLoan {
     // ─── Balancer flash loan callback ────────────────────────────────────────
 
     /// @notice Called by Balancer after transferring the flash loan.
-    ///         Executes the multi-hop swap, repays loan, sends profit to owner.
+    ///         Executes the multi-hop swap, repays loan, splits profit automatically.
     function receiveFlashLoan(
         address[] memory,
         uint256[] memory amounts,
@@ -114,8 +135,17 @@ contract ApexFlashLoan {
         uint256 profit = amountOut > flashAmount ? amountOut - flashAmount : 0;
         require(profit > 0, "No profit");
 
-        IERC20(flashToken).transfer(owner, profit);
-        emit ArbitrageExecuted(flashToken, flashAmount, profit);
+        // ── Auto profit split ────────────────────────────────────────────────
+        uint256 taxAmount = 0;
+        if (taxWallet != address(0) && taxBps > 0) {
+            taxAmount = (profit * taxBps) / 10_000;
+            if (taxAmount > 0) {
+                IERC20(flashToken).transfer(taxWallet, taxAmount);
+            }
+        }
+
+        IERC20(flashToken).transfer(owner, profit - taxAmount);
+        emit ArbitrageExecuted(flashToken, flashAmount, profit, taxAmount);
     }
 
     // ─── Owner utilities ─────────────────────────────────────────────────────

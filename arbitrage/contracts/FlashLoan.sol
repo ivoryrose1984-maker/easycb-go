@@ -3,6 +3,7 @@ pragma solidity ^0.8.19;
 
 // filepath: contracts/FlashLoan.sol
 // Deploy to Base mainnet. Uses Balancer V2 flash loans (0% fee).
+// Profit is automatically split: taxBps% → taxWallet, remainder → owner.
 
 interface IERC20 {
     function approve(address spender, uint256 amount) external returns (bool);
@@ -55,6 +56,10 @@ contract ApexFlashLoan {
 
     address public immutable owner;
 
+    // ─── Profit split ────────────────────────────────────────────────────────
+    address public taxWallet;
+    uint256 public taxBps;  // e.g. 3000 = 30%, max 5000
+
     struct SwapStep {
         address dexRouter;
         address tokenIn;
@@ -65,7 +70,8 @@ contract ApexFlashLoan {
         uint256 minAmountOut;
     }
 
-    event ArbitrageExecuted(address indexed token, uint256 amountIn, uint256 profit);
+    event ArbitrageExecuted(address indexed token, uint256 amountIn, uint256 profit, uint256 taxAmount);
+    event SplitUpdated(address taxWallet, uint256 taxBps);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "Not owner");
@@ -74,6 +80,19 @@ contract ApexFlashLoan {
 
     constructor() {
         owner = msg.sender;
+    }
+
+    // ─── Configure profit split ───────────────────────────────────────────────
+
+    /// @notice Set the tax wallet and percentage. Call once after deployment.
+    /// @param _taxWallet  Address that receives the tax portion of every profit.
+    /// @param _taxBps     Basis points (3000 = 30%, max 5000).
+    function setSplit(address _taxWallet, uint256 _taxBps) external onlyOwner {
+        require(_taxWallet != address(0), "Zero address");
+        require(_taxBps <= 5000, "Max 50%");
+        taxWallet = _taxWallet;
+        taxBps    = _taxBps;
+        emit SplitUpdated(_taxWallet, _taxBps);
     }
 
     // ─── External entry point ────────────────────────────────────────────────
@@ -98,12 +117,10 @@ contract ApexFlashLoan {
 
     // ─── Balancer flash loan callback ────────────────────────────────────────
 
-    /// @notice Balancer calls this after transferring the flash loan.
-    ///         We execute all swaps here, repay the loan, then send profit to owner.
     function receiveFlashLoan(
-        address[] memory,          // tokens (unused — decoded from userData)
-        uint256[] memory amounts,  // amounts borrowed
-        uint256[] memory,          // feeAmounts — always 0 on Balancer V2
+        address[] memory,
+        uint256[] memory amounts,
+        uint256[] memory,
         bytes memory userData
     ) external {
         require(msg.sender == VAULT, "Only Balancer Vault");
@@ -112,7 +129,6 @@ contract ApexFlashLoan {
             abi.decode(userData, (SwapStep[], uint256, address));
 
         uint256 current = amounts[0];
-
         for (uint256 i = 0; i < steps.length; i++) {
             current = _swap(steps[i], current);
         }
@@ -126,8 +142,17 @@ contract ApexFlashLoan {
         uint256 profit = current > flashAmount ? current - flashAmount : 0;
         require(profit > 0, "No profit");
 
-        IERC20(flashToken).transfer(owner, profit);
-        emit ArbitrageExecuted(flashToken, flashAmount, profit);
+        // ── Auto profit split ────────────────────────────────────────────────
+        uint256 taxAmount = 0;
+        if (taxWallet != address(0) && taxBps > 0) {
+            taxAmount = (profit * taxBps) / 10_000;
+            if (taxAmount > 0) {
+                IERC20(flashToken).transfer(taxWallet, taxAmount);
+            }
+        }
+
+        IERC20(flashToken).transfer(owner, profit - taxAmount);
+        emit ArbitrageExecuted(flashToken, flashAmount, profit, taxAmount);
     }
 
     // ─── Internal swap dispatcher ─────────────────────────────────────────────
@@ -165,7 +190,6 @@ contract ApexFlashLoan {
 
     // ─── Owner utilities ─────────────────────────────────────────────────────
 
-    /// @notice Rescue any ERC-20 token that ends up in this contract.
     function withdraw(address token) external onlyOwner {
         uint256 bal = IERC20(token).balanceOf(address(this));
         require(bal > 0, "Nothing to withdraw");

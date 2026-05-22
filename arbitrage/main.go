@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/config"
 	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/internal/arbitrage"
@@ -133,6 +134,41 @@ func main() {
 	)
 	arblogger.TelegramStartup()
 
+	// Gas balance monitor — alerts every hour if wallet is low
+	gasWarnWei      := new(big.Int).Mul(big.NewInt(50_000_000_000_000_000), big.NewInt(1)) // 0.05 ETH
+	gasCriticalWei  := new(big.Int).Mul(big.NewInt(20_000_000_000_000_000), big.NewInt(1)) // 0.02 ETH
+	lastGasAlert    := time.Time{}
+	gasAlertCooldown := time.Hour
+
+	// Derive wallet address from private key for gas monitoring
+	pkBytes, _ := crypto.HexToECDSA(strings.TrimPrefix(cfg.PrivateKey, "0x"))
+	walletAddr  := crypto.PubkeyToAddress(pkBytes.PublicKey)
+
+	go func() {
+		gasTicker := time.NewTicker(5 * time.Minute)
+		defer gasTicker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-gasTicker.C:
+				bal, err := nextClient().BalanceAt(ctx, walletAddr, nil)
+				if err != nil || time.Since(lastGasAlert) < gasAlertCooldown {
+					continue
+				}
+				if bal.Cmp(gasCriticalWei) < 0 {
+					lastGasAlert = time.Now()
+					arblogger.TelegramError(fmt.Sprintf("⛽ CRITICAL: gas wallet at %.4f ETH — bot will stall soon. Send ETH immediately.", toEth(bal)))
+					logger.Warn("gas critical", zap.String("balance_eth", fmt.Sprintf("%.4f", toEth(bal))))
+				} else if bal.Cmp(gasWarnWei) < 0 {
+					lastGasAlert = time.Now()
+					arblogger.TelegramError(fmt.Sprintf("⛽ Low gas: %.4f ETH remaining. Top up to keep bot running.", toEth(bal)))
+					logger.Warn("gas low", zap.String("balance_eth", fmt.Sprintf("%.4f", toEth(bal))))
+				}
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -204,6 +240,11 @@ func main() {
 			execDone()
 		}
 	}
+}
+
+func toEth(wei *big.Int) float64 {
+	f, _ := new(big.Float).Quo(new(big.Float).SetInt(wei), big.NewFloat(1e18)).Float64()
+	return f
 }
 
 func buildLogger(level string) *zap.Logger {

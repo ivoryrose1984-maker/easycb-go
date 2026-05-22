@@ -4,7 +4,7 @@ import * as dotenv from 'dotenv';
 import { createWsProvider } from './infrastructure/wsProvider';
 import { initSupabase, logOpportunity, logTrade } from './infrastructure/supabaseLogger';
 import { getGasForecast } from './infrastructure/gasForecaster';
-import { initTelegram, alertProfit, alertCircuitBreaker, alertError } from './infrastructure/telegramAlert';
+import { initTelegram, alertProfit, alertCircuitBreaker, alertError, sendAlert } from './infrastructure/telegramAlert';
 import { calculateNetProfit, findOptimalLoanSize } from './core/bidMath';
 import { validateOpportunity } from './core/filters';
 import { submitBundleWithFailover } from './core/bundleSubmitter';
@@ -111,6 +111,7 @@ async function main() {
   });
 
   setInterval(() => checkCircuitBreaker(provider, wallet.address), 30_000);
+  setInterval(() => checkGasBalance(provider, wallet.address), 300_000); // every 5 min
 
   process.on('SIGINT', async () => {
     console.log('\n[SHUTDOWN] Graceful shutdown');
@@ -416,6 +417,40 @@ async function getEthPrice(provider: ethers.Provider, quoter: ethers.Contract): 
   } catch (error) {
     console.error('[ORACLE] ETH price fetch failed:', error);
     return null;
+  }
+}
+
+// Gas thresholds in ETH
+const GAS_WARN_ETH    = ethers.parseEther('0.05'); // alert at 0.05 ETH remaining
+const GAS_CRITICAL_ETH = ethers.parseEther('0.02'); // critical at 0.02 ETH
+
+let lastGasAlertTime = 0;
+const GAS_ALERT_COOLDOWN_MS = 3_600_000; // max one alert per hour
+
+async function checkGasBalance(provider: ethers.Provider, address: string) {
+  try {
+    const balance = await provider.getBalance(address);
+    const now     = Date.now();
+
+    if (balance < GAS_CRITICAL_ETH) {
+      if (now - lastGasAlertTime > GAS_ALERT_COOLDOWN_MS) {
+        lastGasAlertTime = now;
+        const ethBal = weiToEth(balance).toFixed(4);
+        const msg    = `⛽ CRITICAL: Gas wallet at ${ethBal} ETH — bot will stall soon. Send at least 0.05 ETH to ${address}`;
+        console.error(`[GAS] ${msg}`);
+        sendAlert(msg, 'critical');
+      }
+    } else if (balance < GAS_WARN_ETH) {
+      if (now - lastGasAlertTime > GAS_ALERT_COOLDOWN_MS) {
+        lastGasAlertTime = now;
+        const ethBal = weiToEth(balance).toFixed(4);
+        const msg    = `⛽ Low gas: ${ethBal} ETH remaining. Top up to keep bots running. Send ETH to ${address}`;
+        console.warn(`[GAS] ${msg}`);
+        sendAlert(msg, 'alert');
+      }
+    }
+  } catch (error: any) {
+    console.error('[GAS] Balance check failed:', error.message);
   }
 }
 
