@@ -143,18 +143,26 @@ async function scanAllOpportunities(
       Promise.allSettled(pairs.map(pair =>
         scanPair(provider, wallet, quoter, apexContract, pair, gasForecast, ethPrice)
       )),
-      findTriangularOpportunities(provider, CONFIG.UNI_QUOTER_V2, CONFIG.MIN_LOAN_USDC, gasForecast, ethPrice),
+      findOptimalLoanSize(async (size) => {
+        const opps = await findTriangularOpportunities(provider, CONFIG.UNI_QUOTER_V2, size, gasForecast, ethPrice);
+        return opps.length > 0 ? opps[0].profitResult : calculateNetProfit(size, 0n, 0n, gasForecast, ethPrice);
+      }),
     ]);
 
+    // triangularResults is now { optimalAmount, maxProfit } from ternary search
+    const triOpps = await findTriangularOpportunities(
+      provider, CONFIG.UNI_QUOTER_V2, triangularResults.optimalAmount, gasForecast, ethPrice
+    );
+
     // Execute best triangular opportunity if found
-    if (triangularResults.length > 0) {
-      const best = triangularResults[0];
-      console.log(`[TRIANGULAR] Best: score=${best.profitResult.score} bps, profit=$${usdcToUsd(best.expectedProfit).toFixed(2)}`);
+    if (triOpps.length > 0) {
+      const best = triOpps[0];
+      console.log(`[TRIANGULAR] Best: score=${best.profitResult.score} bps, profit=$${usdcToUsd(best.expectedProfit).toFixed(2)}, loan=$${usdcToUsd(triangularResults.optimalAmount).toFixed(0)}`);
       if (process.env.DRY_RUN !== 'true') {
         await executeArbitrage(provider, wallet, apexContract, {
           tokenIn:      best.tokens[0],
           tokenOut:     best.tokens[1],
-          amountIn:     CONFIG.MIN_LOAN_USDC,
+          amountIn:     triangularResults.optimalAmount,
           buyRouter:    CONFIG.UNI_ROUTER,
           sellRouter:   CONFIG.UNI_ROUTER,
           path:         best.encodedPath,
