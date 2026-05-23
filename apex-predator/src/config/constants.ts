@@ -36,7 +36,10 @@ const CHAIN_CONFIGS: Record<number, {
     GAS_ESTIMATE:         250_000n,
     MIN_PRIORITY_FEE_GWEI:      1n,
     BUILDERS: [
-      { name: 'flashbots', url: 'https://rpc.flashbots.net', enabled: true },
+      { name: 'flashbots', url: 'https://rpc.flashbots.net',    enabled: true },
+      { name: 'titan',     url: 'https://rpc.titanbuilder.xyz', enabled: true },
+      { name: 'beaver',    url: 'https://rpc.beaverbuild.org',  enabled: true },
+      { name: 'rsync',     url: 'https://rsync-builder.xyz',    enabled: true },
     ],
   },
   // Arbitrum mainnet
