@@ -366,7 +366,7 @@ async function executeArbitrage(
 
     tx.from                = wallet.address;
     tx.chainId             = BigInt(CONFIG.CHAIN_ID);
-    tx.gasLimit            = CONFIG.GAS_ESTIMATE;
+    tx.gasLimit            = CONFIG.TX_GAS_LIMIT;
     tx.maxFeePerGas        = params.profitResult.maxFeePerGas;
     tx.maxPriorityFeePerGas = params.profitResult.priorityFeePerGas;
     tx.nonce               = await provider.getTransactionCount(wallet.address);

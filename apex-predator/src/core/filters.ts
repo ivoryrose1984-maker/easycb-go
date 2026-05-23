@@ -28,7 +28,7 @@ export async function checkLiquidity(
       provider
     );
 
-    for (const fee of [500, 3000, 10000]) {
+    for (const fee of [100, 500, 3000, 10000]) {
       try {
         const poolAddress = await factory.getPool(tokenIn, tokenOut, fee);
         if (poolAddress === ethers.ZeroAddress) continue;

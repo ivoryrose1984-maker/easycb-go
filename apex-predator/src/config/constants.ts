@@ -11,7 +11,7 @@ const CHAIN_CONFIGS: Record<number, {
   WETH: string; USDC: string; USDT: string; DAI: string;
   cbBTC?: string; cbETH?: string;
   AERO?: string; USDbC?: string; VIRTUAL?: string; BRETT?: string; TBTC?: string;
-  GAS_ESTIMATE: bigint; MIN_PRIORITY_FEE_GWEI: bigint;
+  GAS_ESTIMATE: bigint; TX_GAS_LIMIT: bigint; MIN_PRIORITY_FEE_GWEI: bigint;
   BUILDERS: { name: string; url: string; enabled: boolean }[];
 }> = {
   // Base mainnet
@@ -34,6 +34,7 @@ const CHAIN_CONFIGS: Record<number, {
     BRETT:   '0x532f27101965dd16442E59d40670FaF5eBB142E4',
     TBTC:    '0x236aa50979D5f3De3Bd1Eeb40E81137F22ab794b',
     GAS_ESTIMATE:         250_000n,
+    TX_GAS_LIMIT:         600_000n,
     MIN_PRIORITY_FEE_GWEI:      1n,
     BUILDERS: [
       { name: 'flashbots', url: 'https://rpc.flashbots.net',    enabled: true },
@@ -55,6 +56,7 @@ const CHAIN_CONFIGS: Record<number, {
     USDT:  '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9',
     DAI:   '0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1',
     GAS_ESTIMATE:         300_000n,
+    TX_GAS_LIMIT:         600_000n,
     MIN_PRIORITY_FEE_GWEI:      2n,
     BUILDERS: [
       { name: 'flashbots', url: 'https://rpc.flashbots.net', enabled: true },
@@ -73,6 +75,7 @@ const CHAIN_CONFIGS: Record<number, {
     USDT:  '0xaA8E23Fb1079EA71e0a56F48a2aA51851D8433D0',
     DAI:   '0xFF34B3d4Aee8ddCd6F9AFFFB6Fe49bD371b8a357',
     GAS_ESTIMATE:         350_000n,
+    TX_GAS_LIMIT:         600_000n,
     MIN_PRIORITY_FEE_GWEI:      5n,
     BUILDERS: [
       { name: 'flashbots', url: 'https://relay-sepolia.flashbots.net', enabled: true },

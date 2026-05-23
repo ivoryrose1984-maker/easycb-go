@@ -108,6 +108,11 @@ contract ApexFlashLoan {
         uint256 minAmountOut; ///< Minimum tokens out from this hop (slippage guard).
     }
 
+    // ── Router whitelist ──────────────────────────────────────────────────────
+
+    /// @notice Only whitelisted routers may be called during swap hops.
+    mapping(address => bool) public approvedRouters;
+
     // ── Events ────────────────────────────────────────────────────────────────
 
     event ArbitrageExecuted(
@@ -120,6 +125,7 @@ contract ApexFlashLoan {
     event PausedStateChanged(bool paused);
     event MinProfitUpdated(uint256 minProfit);
     event EmergencyWithdraw(address indexed token, uint256 amount, address indexed to);
+    event RouterApproved(address indexed router, bool approved);
 
     // ── Modifiers ─────────────────────────────────────────────────────────────
 
@@ -167,6 +173,18 @@ contract ApexFlashLoan {
     function setPaused(bool _paused) external onlyOwner {
         paused = _paused;
         emit PausedStateChanged(_paused);
+    }
+
+    // ─── Admin — router whitelist ─────────────────────────────────────────────
+
+    /// @notice Approve or revoke a DEX router address.
+    ///         Only approved routers may be called in `_swap()`.
+    /// @param _router   The DEX router address to configure.
+    /// @param _approved True to approve; false to revoke.
+    function setRouter(address _router, bool _approved) external onlyOwner {
+        require(_router != address(0), "Zero address");
+        approvedRouters[_router] = _approved;
+        emit RouterApproved(_router, _approved);
     }
 
     // ─── Admin — min profit ───────────────────────────────────────────────────
@@ -276,6 +294,7 @@ contract ApexFlashLoan {
     ///      Applies approve-zero-first before every allowance grant.
     function _swap(SwapStep memory step, uint256 amountIn) internal returns (uint256) {
         require(step.dexRouter != address(0), "Zero router");
+        require(approvedRouters[step.dexRouter], "Router not approved");
         require(step.tokenIn   != address(0), "Zero tokenIn");
         require(step.tokenOut  != address(0), "Zero tokenOut");
         require(amountIn > 0,                 "Zero amountIn");

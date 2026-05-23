@@ -144,6 +144,10 @@ func (d *Detector) FindCycles(
 	d.logger.Debug("candidate cycles found", zap.Int("count", len(candidates)))
 
 	// Simulate each candidate concurrently using exact-pool quotes.
+	// Semaphore caps concurrent RPC goroutines to avoid rate-limit exhaustion.
+	const maxConcurrent = 20
+	sem := make(chan struct{}, maxConcurrent)
+
 	type simResult struct {
 		cycle *types.Cycle
 		err   error
@@ -152,6 +156,8 @@ func (d *Detector) FindCycles(
 
 	for _, c := range candidates {
 		go func(p path) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			cycle, err := d.simulateCycle(ctx, p.tokens, p.pools, amountIn, gasCostBase, minNetProfit, blockNum)
 			results <- simResult{cycle: cycle, err: err}
 		}(c)
