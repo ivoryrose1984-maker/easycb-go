@@ -124,21 +124,15 @@ func (a *Aerodrome) GetQuote(ctx context.Context, pool types.Pool, tokenIn commo
 	if err != nil {
 		return nil, fmt.Errorf("getAmountsOut call: %w", err)
 	}
-	// Result is uint256[] — last element is amountOut
-	if len(result) < 96 { // 32 offset + 32 length + 32 first element minimum
-		return nil, fmt.Errorf("unexpected result length %d", len(result))
+	out, err := a.routerABI.Unpack("getAmountsOut", result)
+	if err != nil {
+		return nil, fmt.Errorf("unpack getAmountsOut: %w", err)
 	}
-	// Decode array: offset(32) + length(32) + elements
-	arrLen := new(big.Int).SetBytes(result[32:64]).Uint64()
-	if arrLen < 2 {
-		return nil, fmt.Errorf("getAmountsOut returned %d elements", arrLen)
+	amounts, ok := out[0].([]*big.Int)
+	if !ok || len(amounts) < 2 {
+		return nil, fmt.Errorf("getAmountsOut: unexpected result %v", out)
 	}
-	// Last element starts at 64 + (arrLen-1)*32
-	offset := 64 + (arrLen-1)*32
-	if uint64(len(result)) < offset+32 {
-		return nil, fmt.Errorf("result too short for %d elements", arrLen)
-	}
-	return new(big.Int).SetBytes(result[offset : offset+32]), nil
+	return new(big.Int).Set(amounts[len(amounts)-1]), nil
 }
 
 // BuildSwapStep returns the SwapStep struct for the flash loan contract.

@@ -14,8 +14,12 @@ var (
 	tgToken    string
 	tgChatID   string
 	tgActive   bool
-	tgLastSent atomic.Int64 // unix ms — rate limit one alert per minute
 	tgClient   = &http.Client{Timeout: 5 * time.Second}
+
+	// Per-category rate limits so an error alert is never blocked by a profit message.
+	tgProfitLast  atomic.Int64 // unix ms
+	tgErrorLast   atomic.Int64
+	tgStartupLast atomic.Int64
 )
 
 func init() {
@@ -32,27 +36,26 @@ func TelegramProfit(profitUsd float64, txHash string) {
 		return
 	}
 	msg := fmt.Sprintf("💰 *PROFIT*\n\n$%.2f on Base\nTx: `%s`", profitUsd, txHash)
-	sendTelegram(msg)
+	sendTelegram(msg, &tgProfitLast)
 }
 
 func TelegramError(err string) {
-	sendTelegram(fmt.Sprintf("⚠️ *Go Bot Error*\n\n%s", err))
+	sendTelegram(fmt.Sprintf("⚠️ *Go Bot Error*\n\n%s", err), &tgErrorLast)
 }
 
 func TelegramStartup() {
-	sendTelegram("✅ *Go bot started* — scanning Base L2")
+	sendTelegram("✅ *Go bot started* — scanning Base L2", &tgStartupLast)
 }
 
-func sendTelegram(text string) {
+func sendTelegram(text string, lastSent *atomic.Int64) {
 	if !tgActive {
 		return
 	}
 	now := time.Now().UnixMilli()
-	last := tgLastSent.Load()
-	if now-last < 60_000 {
-		return // rate limit: one alert per 60s
+	if now-lastSent.Load() < 60_000 {
+		return // per-category rate limit: one alert per 60s
 	}
-	tgLastSent.Store(now)
+	lastSent.Store(now)
 
 	go func() {
 		body, _ := json.Marshal(map[string]any{

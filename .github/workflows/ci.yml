@@ -33,8 +33,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check Solidity files exist and are valid
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install solc 0.8.19
         run: |
-          test -f apex-predator/contracts/ApexFlashLoan.sol
-          test -f arbitrage/contracts/FlashLoan.sol
-          echo "Contracts present ✅"
+          pip install solc-select --quiet
+          solc-select install 0.8.19
+          solc-select use 0.8.19
+      - name: Compile contracts
+        run: |
+          solc --bin arbitrage/contracts/FlashLoan.sol
+          solc --bin apex-predator/contracts/ApexFlashLoan.sol
+          echo "Contracts compiled ✅"
