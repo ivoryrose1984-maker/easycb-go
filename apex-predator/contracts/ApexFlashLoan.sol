@@ -209,7 +209,7 @@ contract ApexFlashLoan {
     function receiveFlashLoan(
         address[] memory tokens,
         uint256[] memory amounts,
-        uint256[] memory,          // feeAmounts — always 0 on Balancer V2
+        uint256[] memory feeAmounts, // currently 0 on Balancer V2; included for forward-compat
         bytes memory userData
     ) external nonReentrant whenNotPaused {
         // ── Caller validation ────────────────────────────────────────────────
@@ -250,13 +250,14 @@ contract ApexFlashLoan {
         // Using balanceOf (rather than relying on amountOut) defends against
         // fee-on-transfer tokens and router rounding.
         uint256 finalBalance = IERC20(flashToken).balanceOf(address(this));
-        require(finalBalance >= flashAmount, "Cannot repay loan");
-        uint256 profit = finalBalance - flashAmount;
+        uint256 repayment = flashAmount + feeAmounts[0];
+        require(finalBalance >= repayment, "Cannot repay loan");
+        uint256 profit = finalBalance - repayment;
         require(profit >= minProfitUsdc, "Below min profit");
 
-        // ── Repay Balancer (fee = 0) ─────────────────────────────────────────
+        // ── Repay Balancer ────────────────────────────────────────────────────
         require(
-            IERC20(flashToken).transfer(VAULT, flashAmount),
+            IERC20(flashToken).transfer(VAULT, repayment),
             "Repay failed"
         );
 

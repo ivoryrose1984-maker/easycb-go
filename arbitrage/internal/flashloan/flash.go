@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"strings"
 
+	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -84,6 +85,49 @@ type abiSwapStep struct {
 	AeroStable   bool
 	AeroFactory  common.Address
 	MinAmountOut *big.Int
+}
+
+// Simulate performs a dry eth_call of executeArbitrage to detect reverts before broadcast.
+// Returns nil if the call succeeds; a descriptive error if it would revert.
+func (e *Executor) Simulate(ctx context.Context, cycle *arbtypes.Cycle) error {
+	if len(cycle.Steps) != 3 {
+		return fmt.Errorf("cycle must have exactly 3 steps")
+	}
+
+	steps := make([]abiSwapStep, 3)
+	for i, s := range cycle.Steps {
+		steps[i] = abiSwapStep{
+			DexRouter:    s.DexRouter,
+			TokenIn:      s.TokenIn,
+			TokenOut:     s.TokenOut,
+			UniV3Fee:     new(big.Int).SetUint64(uint64(s.UniV3Fee)),
+			AeroStable:   s.AeroStable,
+			AeroFactory:  s.AeroFactory,
+			MinAmountOut: s.MinAmountOut,
+		}
+	}
+
+	data, err := e.contractABI.Pack("executeArbitrage",
+		cycle.Tokens[0].Address,
+		cycle.AmountIn,
+		steps,
+	)
+	if err != nil {
+		return fmt.Errorf("pack executeArbitrage: %w", err)
+	}
+
+	pub := e.privateKey.Public().(*ecdsa.PublicKey)
+	from := crypto.PubkeyToAddress(*pub)
+
+	_, err = e.client.CallContract(ctx, ethereum.CallMsg{
+		From: from,
+		To:   &e.contractAddr,
+		Data: data,
+	}, nil) // nil = latest block
+	if err != nil {
+		return fmt.Errorf("preflight simulation reverted: %w", err)
+	}
+	return nil
 }
 
 // Execute builds and broadcasts the flash loan transaction.

@@ -140,9 +140,15 @@ func main() {
 	lastGasAlert    := time.Time{}
 	gasAlertCooldown := time.Hour
 
-	// Derive wallet address from private key for gas monitoring
-	pkBytes, _ := crypto.HexToECDSA(strings.TrimPrefix(cfg.PrivateKey, "0x"))
-	walletAddr  := crypto.PubkeyToAddress(pkBytes.PublicKey)
+	// Derive wallet address from private key for gas monitoring (live mode only)
+	var walletAddr common.Address
+	if !cfg.DryRun && cfg.PrivateKey != "" {
+		pkBytes, err := crypto.HexToECDSA(strings.TrimPrefix(cfg.PrivateKey, "0x"))
+		if err != nil {
+			logger.Fatal("invalid private key", zap.Error(err))
+		}
+		walletAddr = crypto.PubkeyToAddress(pkBytes.PublicKey)
+	}
 
 	go func() {
 		gasTicker := time.NewTicker(5 * time.Minute)
@@ -152,6 +158,10 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-gasTicker.C:
+				// Skip gas monitor in dry-run or if wallet address not set
+				if (walletAddr == common.Address{}) {
+					continue
+				}
 				bal, err := nextClient().BalanceAt(ctx, walletAddr, nil)
 				if err != nil || time.Since(lastGasAlert) < gasAlertCooldown {
 					continue
@@ -200,9 +210,15 @@ func main() {
 				time.Sleep(jitter)
 			}
 
+			// Fetch current block number once per scan for quote freshness gating
+			var currentBlock uint64
+			if blk, err := nextClient().BlockNumber(ctx); err == nil {
+				currentBlock = blk
+			}
+
 			// Find cycles at min loan first (fast probe)
 			scanCtx, done := context.WithTimeout(ctx, 4*time.Second)
-			cycles, err := detector.FindCycles(scanCtx, dex.BaseTokens.USDC, loanMin, gasCostBase, minProfit)
+			cycles, err := detector.FindCycles(scanCtx, dex.BaseTokens.USDC, loanMin, gasCostBase, minProfit, currentBlock)
 			done()
 
 			if err != nil {
@@ -215,11 +231,11 @@ func main() {
 
 			// Best cycle confirmed at $1K — find optimal loan size via ternary search
 			bestCycle := cycles[0]
-			optimalLoan := findOptimalLoanSize(ctx, detector, bestCycle, loanMin, loanMax, gasCostBase, minProfit)
+			optimalLoan := findOptimalLoanSize(ctx, detector, bestCycle, loanMin, loanMax, gasCostBase, minProfit, currentBlock)
 			if optimalLoan.Cmp(loanMin) > 0 {
 				// Re-simulate at optimal size to get accurate steps and PnL
 				optCtx, optDone := context.WithTimeout(ctx, 4*time.Second)
-				optCycles, optErr := detector.FindCycles(optCtx, dex.BaseTokens.USDC, optimalLoan, gasCostBase, minProfit)
+				optCycles, optErr := detector.FindCycles(optCtx, dex.BaseTokens.USDC, optimalLoan, gasCostBase, minProfit, currentBlock)
 				optDone()
 				if optErr == nil && len(optCycles) > 0 {
 					bestCycle = optCycles[0]
@@ -250,7 +266,7 @@ func main() {
 
 			// Execute only the best cycle per scan to avoid nonce conflicts
 			execCtx, execDone := context.WithTimeout(ctx, 10*time.Second)
-			if err := exec.Execute(execCtx, bestCycle); err != nil {
+			if err := exec.Execute(execCtx, bestCycle, currentBlock); err != nil {
 				logger.Error("execution error", zap.Error(err))
 			}
 			execDone()
@@ -280,6 +296,7 @@ func findOptimalLoanSize(
 	detector *arbitrage.Detector,
 	sample *arbtypes.Cycle,
 	loanMin, loanMax, gasCost, minProfit *big.Int,
+	currentBlock uint64,
 ) *big.Int {
 	tokens := [3]common.Address{
 		sample.Tokens[0].Address,
@@ -290,7 +307,7 @@ func findOptimalLoanSize(
 	bestPnL := func(size *big.Int) *big.Int {
 		tCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		cycles, err := detector.FindCycles(tCtx, tokens[0], size, gasCost, minProfit)
+		cycles, err := detector.FindCycles(tCtx, tokens[0], size, gasCost, minProfit, currentBlock)
 		if err != nil || len(cycles) == 0 {
 			return new(big.Int)
 		}

@@ -37,6 +37,21 @@ type Config struct {
 
 	// Log level: debug | info | warn | error
 	LogLevel string `mapstructure:"log_level"`
+
+	// Quote freshness — reject cycles quoted more than this many blocks ago
+	MaxQuoteBlockAge uint64 `mapstructure:"max_quote_block_age"` // default 2
+
+	// Max age of an opportunity in ms before the time-based staleness guard fires
+	MaxOpportunityAgeMs int `mapstructure:"max_opportunity_age_ms"` // default 1500
+
+	// Profit must exceed gas cost by at least this many bps above break-even
+	ProfitSafetyBps int `mapstructure:"profit_safety_bps"` // default 1500
+
+	// Circuit breaker — pause after this many consecutive execution failures
+	MaxConsecutiveFailures int `mapstructure:"max_consecutive_failures"` // default 3
+
+	// Duration in seconds to pause after the circuit breaker opens
+	FailureCooldownSeconds int `mapstructure:"failure_cooldown_seconds"` // default 300
 }
 
 // Load reads config from env vars and optionally a YAML file.
@@ -54,6 +69,11 @@ func Load() (*Config, error) {
 	v.SetDefault("max_jitter_ms", 200)
 	v.SetDefault("dry_run", true)
 	v.SetDefault("log_level", "info")
+	v.SetDefault("max_quote_block_age", 2)
+	v.SetDefault("max_opportunity_age_ms", 1500)
+	v.SetDefault("profit_safety_bps", 1500)
+	v.SetDefault("max_consecutive_failures", 3)
+	v.SetDefault("failure_cooldown_seconds", 300)
 
 	// File (optional)
 	v.SetConfigName("config")
@@ -71,11 +91,20 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
-	if cfg.PrivateKey == "" {
-		return nil, fmt.Errorf("ARB_PRIVATE_KEY is required")
+	if !cfg.DryRun && cfg.PrivateKey == "" {
+		return nil, fmt.Errorf("ARB_PRIVATE_KEY is required when not in dry-run mode")
 	}
 	if len(cfg.RPCURLs) == 0 {
 		return nil, fmt.Errorf("ARB_RPC_URLS is required")
+	}
+	if cfg.ProfitSafetyBps < 0 {
+		return nil, fmt.Errorf("profit_safety_bps must be non-negative")
+	}
+	if cfg.MaxConsecutiveFailures <= 0 {
+		cfg.MaxConsecutiveFailures = 3
+	}
+	if cfg.FailureCooldownSeconds <= 0 {
+		cfg.FailureCooldownSeconds = 300
 	}
 	return &cfg, nil
 }

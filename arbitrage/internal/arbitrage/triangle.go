@@ -71,14 +71,26 @@ func (d *Detector) RebuildGraph(ctx context.Context) error {
 	return nil
 }
 
+// directionalCycleKey produces a stable, direction-aware key for a 3-pool cycle.
+// Keys are directional (A→B→C ≠ A→C→B) and pool-specific (same token path through
+// different pools generates different keys).
+func directionalCycleKey(base, mid, end common.Address, p1, p2, p3 types.Pool) string {
+	return base.Hex() + "|" + mid.Hex() + "|" + end.Hex() + "|" +
+		p1.Address.Hex() + "|" + string(p1.Type) + "|" +
+		p2.Address.Hex() + "|" + string(p2.Type) + "|" +
+		p3.Address.Hex() + "|" + string(p3.Type)
+}
+
 // FindCycles discovers all 3-token cycles starting from baseToken (usually USDC)
 // and simulates each with amountIn to find profitable ones.
+// currentBlock is used to stamp QuoteBlock on returned cycles.
 func (d *Detector) FindCycles(
 	ctx context.Context,
 	baseToken common.Address,
 	amountIn *big.Int,
 	gasCostBase *big.Int, // estimated gas cost in baseToken units
 	minNetProfit *big.Int,
+	currentBlock ...uint64, // optional; defaults to 0 (time-only freshness still applies)
 ) ([]*types.Cycle, error) {
 	d.mu.RLock()
 	g := d.graph
@@ -88,10 +100,16 @@ func (d *Detector) FindCycles(
 		return nil, fmt.Errorf("graph is empty — call RebuildGraph first")
 	}
 
-	// DFS: find all paths [base, mid, end] where end has edge back to base
+	var blockNum uint64
+	if len(currentBlock) > 0 {
+		blockNum = currentBlock[0]
+	}
+
+	// DFS: find all paths [base, mid, end] with a return edge back to base,
+	// storing all three pools for exact-pool simulation.
 	type path struct {
 		tokens [3]common.Address
-		pools  [2]types.Pool // first two edges; third found in loop
+		pools  [3]types.Pool
 	}
 	var candidates []path
 	seen := make(map[string]bool)
@@ -106,22 +124,18 @@ func (d *Detector) FindCycles(
 			if end == baseToken || end == mid {
 				continue
 			}
-			// Check if end connects back to base
 			for _, e3 := range g[end] {
 				if e3.Neighbor != baseToken {
 					continue
 				}
-				// Deduplicate by direction: (mid, end) pair is directionally unique
-				// since baseToken is constant. Do NOT sort — USDC→WETH→USDT and
-				// USDC→USDT→WETH are different cycles with different profitability.
-				key := mid.Hex() + end.Hex()
+				key := directionalCycleKey(baseToken, mid, end, e1.Pool, e2.Pool, e3.Pool)
 				if seen[key] {
 					continue
 				}
 				seen[key] = true
 				candidates = append(candidates, path{
 					tokens: [3]common.Address{baseToken, mid, end},
-					pools:  [2]types.Pool{e1.Pool, e2.Pool},
+					pools:  [3]types.Pool{e1.Pool, e2.Pool, e3.Pool},
 				})
 			}
 		}
@@ -129,7 +143,7 @@ func (d *Detector) FindCycles(
 
 	d.logger.Debug("candidate cycles found", zap.Int("count", len(candidates)))
 
-	// Simulate each candidate concurrently
+	// Simulate each candidate concurrently using exact-pool quotes.
 	type simResult struct {
 		cycle *types.Cycle
 		err   error
@@ -138,7 +152,7 @@ func (d *Detector) FindCycles(
 
 	for _, c := range candidates {
 		go func(p path) {
-			cycle, err := d.simulateCycle(ctx, p.tokens, amountIn, gasCostBase, minNetProfit)
+			cycle, err := d.simulateCycle(ctx, p.tokens, p.pools, amountIn, gasCostBase, minNetProfit, blockNum)
 			results <- simResult{cycle: cycle, err: err}
 		}(c)
 	}
@@ -160,33 +174,36 @@ func (d *Detector) FindCycles(
 	return profitable, nil
 }
 
-// simulateCycle fetches real quotes for a 3-hop path and returns a Cycle if profitable.
+// simulateCycle fetches real quotes for a 3-hop path using exact pools,
+// and returns a Cycle if it meets the minimum profit threshold.
 func (d *Detector) simulateCycle(
 	ctx context.Context,
 	tokens [3]common.Address,
+	pools [3]types.Pool,
 	amountIn *big.Int,
 	gasCostBase *big.Int,
 	minNetProfit *big.Int,
+	quoteBlock uint64,
 ) (*types.Cycle, error) {
-	// Leg 1: tokens[0] → tokens[1]
-	q1, err := d.router.BestQuote(ctx, tokens[0], tokens[1], amountIn)
-	if err != nil || q1 == nil || q1.AmountOut.Sign() == 0 {
+	// Leg 1: tokens[0] → tokens[1] through exact pool
+	out1, err := d.router.GetQuoteForPool(ctx, pools[0], tokens[0], amountIn)
+	if err != nil || out1 == nil || out1.Sign() == 0 {
 		return nil, nil
 	}
 
-	// Leg 2: tokens[1] → tokens[2]
-	q2, err := d.router.BestQuote(ctx, tokens[1], tokens[2], q1.AmountOut)
-	if err != nil || q2 == nil || q2.AmountOut.Sign() == 0 {
+	// Leg 2: tokens[1] → tokens[2] through exact pool
+	out2, err := d.router.GetQuoteForPool(ctx, pools[1], tokens[1], out1)
+	if err != nil || out2 == nil || out2.Sign() == 0 {
 		return nil, nil
 	}
 
-	// Leg 3: tokens[2] → tokens[0]
-	q3, err := d.router.BestQuote(ctx, tokens[2], tokens[0], q2.AmountOut)
-	if err != nil || q3 == nil || q3.AmountOut.Sign() == 0 {
+	// Leg 3: tokens[2] → tokens[0] through exact pool (closes the cycle)
+	out3, err := d.router.GetQuoteForPool(ctx, pools[2], tokens[2], out2)
+	if err != nil || out3 == nil || out3.Sign() == 0 {
 		return nil, nil
 	}
 
-	gross := new(big.Int).Sub(q3.AmountOut, amountIn) // can be negative
+	gross := new(big.Int).Sub(out3, amountIn) // can be negative
 	net := new(big.Int).Sub(gross, gasCostBase)
 
 	if net.Cmp(minNetProfit) < 0 {
@@ -209,17 +226,18 @@ func (d *Detector) simulateCycle(
 
 	return &types.Cycle{
 		Tokens:     [3]types.Token{tok(tokens[0]), tok(tokens[1]), tok(tokens[2])},
-		Pools:      [3]types.Pool{q1.Pool, q2.Pool, q3.Pool},
+		Pools:      [3]types.Pool{pools[0], pools[1], pools[2]},
 		Steps: [3]types.SwapStep{
-			d.router.BuildSwapStep(q1.Pool, tokens[0], amountIn, slip(q1.AmountOut)),
-			d.router.BuildSwapStep(q2.Pool, tokens[1], q1.AmountOut, slip(q2.AmountOut)),
-			d.router.BuildSwapStep(q3.Pool, tokens[2], q2.AmountOut, slip(q3.AmountOut)),
+			d.router.BuildSwapStep(pools[0], tokens[0], amountIn, slip(out1)),
+			d.router.BuildSwapStep(pools[1], tokens[1], out1, slip(out2)),
+			d.router.BuildSwapStep(pools[2], tokens[2], out2, slip(out3)),
 		},
 		AmountIn:   new(big.Int).Set(amountIn),
-		AmountOut:  new(big.Int).Set(q3.AmountOut),
+		AmountOut:  new(big.Int).Set(out3),
 		GrossPnL:   new(big.Int).Set(gross),
 		GasCostEst: new(big.Int).Set(gasCostBase),
 		NetPnLUSDC: new(big.Int).Set(net),
+		QuoteBlock: quoteBlock,
 	}, nil
 }
 

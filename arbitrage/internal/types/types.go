@@ -55,6 +55,7 @@ type Cycle struct {
 	GrossPnL    *big.Int   // AmountOut - AmountIn
 	GasCostEst  *big.Int   // estimated gas cost in Tokens[0] units (same as AmountIn denomination)
 	NetPnLUSDC  *big.Int   // after gas, denominated in Tokens[0] units
+	QuoteBlock  uint64     // block number when quotes were fetched
 }
 
 // Profitable returns true when the cycle yields net profit.
