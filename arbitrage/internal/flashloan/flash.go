@@ -2,11 +2,18 @@
 package flashloan
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
+	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	ethereum "github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -45,6 +52,8 @@ type Executor struct {
 	privateKey   *ecdsa.PrivateKey
 	gasLimit     uint64
 	chainID      *big.Int
+	builderURLs  []string // private builder RPC endpoints
+	httpClient   *http.Client
 	logger       *zap.Logger
 }
 
@@ -55,6 +64,7 @@ func NewExecutor(
 	privateKeyHex string,
 	gasLimit uint64,
 	chainID *big.Int,
+	builderURLs []string,
 	logger *zap.Logger,
 ) (*Executor, error) {
 	pk, err := crypto.HexToECDSA(strings.TrimPrefix(privateKeyHex, "0x"))
@@ -72,6 +82,8 @@ func NewExecutor(
 		privateKey:   pk,
 		gasLimit:     gasLimit,
 		chainID:      chainID,
+		builderURLs:  builderURLs,
+		httpClient:   &http.Client{Timeout: 5 * time.Second},
 		logger:       logger,
 	}, nil
 }
@@ -87,13 +99,7 @@ type abiSwapStep struct {
 	MinAmountOut *big.Int
 }
 
-// Simulate performs a dry eth_call of executeArbitrage to detect reverts before broadcast.
-// Returns nil if the call succeeds; a descriptive error if it would revert.
-func (e *Executor) Simulate(ctx context.Context, cycle *arbtypes.Cycle) error {
-	if len(cycle.Steps) != 3 {
-		return fmt.Errorf("cycle must have exactly 3 steps")
-	}
-
+func buildSteps(cycle *arbtypes.Cycle) []abiSwapStep {
 	steps := make([]abiSwapStep, 3)
 	for i, s := range cycle.Steps {
 		steps[i] = abiSwapStep{
@@ -106,57 +112,46 @@ func (e *Executor) Simulate(ctx context.Context, cycle *arbtypes.Cycle) error {
 			MinAmountOut: s.MinAmountOut,
 		}
 	}
+	return steps
+}
 
-	data, err := e.contractABI.Pack("executeArbitrage",
+func (e *Executor) packData(cycle *arbtypes.Cycle) ([]byte, error) {
+	if len(cycle.Steps) != 3 {
+		return nil, fmt.Errorf("cycle must have exactly 3 steps")
+	}
+	return e.contractABI.Pack("executeArbitrage",
 		cycle.Tokens[0].Address,
 		cycle.AmountIn,
-		steps,
+		buildSteps(cycle),
 	)
-	if err != nil {
-		return fmt.Errorf("pack executeArbitrage: %w", err)
-	}
+}
 
+// Simulate performs a dry eth_call of executeArbitrage to detect reverts before broadcast.
+func (e *Executor) Simulate(ctx context.Context, cycle *arbtypes.Cycle) error {
+	data, err := e.packData(cycle)
+	if err != nil {
+		return fmt.Errorf("pack: %w", err)
+	}
 	pub := e.privateKey.Public().(*ecdsa.PublicKey)
 	from := crypto.PubkeyToAddress(*pub)
-
 	_, err = e.client.CallContract(ctx, ethereum.CallMsg{
 		From: from,
 		To:   &e.contractAddr,
 		Data: data,
-	}, nil) // nil = latest block
+	}, nil)
 	if err != nil {
 		return fmt.Errorf("preflight simulation reverted: %w", err)
 	}
 	return nil
 }
 
-// Execute builds and broadcasts the flash loan transaction.
+// Execute builds the signed transaction and sends it to private builders concurrently.
+// Falls back to the public mempool if no builders are configured.
 // Returns the transaction hash on success.
 func (e *Executor) Execute(ctx context.Context, cycle *arbtypes.Cycle) (string, error) {
-	if len(cycle.Steps) != 3 {
-		return "", fmt.Errorf("cycle must have exactly 3 steps")
-	}
-
-	steps := make([]abiSwapStep, 3)
-	for i, s := range cycle.Steps {
-		steps[i] = abiSwapStep{
-			DexRouter:    s.DexRouter,
-			TokenIn:      s.TokenIn,
-			TokenOut:     s.TokenOut,
-			UniV3Fee:     new(big.Int).SetUint64(uint64(s.UniV3Fee)),
-			AeroStable:   s.AeroStable,
-			AeroFactory:  s.AeroFactory,
-			MinAmountOut: s.MinAmountOut,
-		}
-	}
-
-	data, err := e.contractABI.Pack("executeArbitrage",
-		cycle.Tokens[0].Address, // flashToken (always start token)
-		cycle.AmountIn,
-		steps,
-	)
+	data, err := e.packData(cycle)
 	if err != nil {
-		return "", fmt.Errorf("pack executeArbitrage: %w", err)
+		return "", err
 	}
 
 	auth, err := e.buildTransactOpts(ctx)
@@ -179,15 +174,120 @@ func (e *Executor) Execute(ctx context.Context, cycle *arbtypes.Cycle) (string, 
 		return "", fmt.Errorf("sign tx: %w", err)
 	}
 
+	if len(e.builderURLs) > 0 {
+		return e.sendToBuilders(ctx, signedTx)
+	}
+
+	// Public mempool fallback (dry-run or no builders configured)
 	if err := e.client.SendTransaction(ctx, signedTx); err != nil {
 		return "", fmt.Errorf("send tx: %w", err)
 	}
+	hash := signedTx.Hash().Hex()
+	e.logger.Info("transaction sent via public mempool", zap.String("hash", hash))
+	return hash, nil
+}
 
-	e.logger.Info("transaction sent",
-		zap.String("hash", signedTx.Hash().Hex()),
-		zap.String("to", e.contractAddr.Hex()),
-	)
-	return signedTx.Hash().Hex(), nil
+// sendToBuilders submits the signed tx to all configured private builders concurrently
+// via standard JSON-RPC eth_sendRawTransaction. Returns on the first success.
+func (e *Executor) sendToBuilders(ctx context.Context, signedTx *types.Transaction) (string, error) {
+	rawTx, err := signedTx.MarshalBinary()
+	if err != nil {
+		return "", fmt.Errorf("marshal tx: %w", err)
+	}
+	hexTx := "0x" + hex.EncodeToString(rawTx)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "eth_sendRawTransaction",
+		"params":  []string{hexTx},
+		"id":      1,
+	})
+
+	type result struct {
+		builder string
+		hash    string
+		err     error
+	}
+	results := make(chan result, len(e.builderURLs))
+
+	var wg sync.WaitGroup
+	for _, url := range e.builderURLs {
+		wg.Add(1)
+		go func(builderURL string) {
+			defer wg.Done()
+			start := time.Now()
+			hash, err := e.postRawTx(ctx, builderURL, body)
+			elapsed := time.Since(start)
+			if err != nil {
+				e.logger.Debug("builder rejected tx",
+					zap.String("builder", builderURL),
+					zap.Duration("elapsed", elapsed),
+					zap.Error(err),
+				)
+			} else {
+				e.logger.Info("builder accepted tx",
+					zap.String("builder", builderURL),
+					zap.String("hash", hash),
+					zap.Duration("elapsed", elapsed),
+				)
+			}
+			results <- result{builder: builderURL, hash: hash, err: err}
+		}(url)
+	}
+
+	go func() { wg.Wait(); close(results) }()
+
+	var errs []string
+	for r := range results {
+		if r.err == nil && r.hash != "" {
+			// Drain remaining results without blocking
+			go func() {
+				for range results {
+				}
+			}()
+			return r.hash, nil
+		}
+		if r.err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %s", r.builder, r.err.Error()))
+		}
+	}
+	return "", fmt.Errorf("all builders failed: %s", strings.Join(errs, "; "))
+}
+
+type rpcResponse struct {
+	Result string `json:"result"`
+	Error  *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func (e *Executor) postRawTx(ctx context.Context, builderURL string, body []byte) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, builderURL, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := e.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	var rpc rpcResponse
+	if err := json.Unmarshal(respBody, &rpc); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+	if rpc.Error != nil {
+		return "", fmt.Errorf("rpc error %d: %s", rpc.Error.Code, rpc.Error.Message)
+	}
+	return rpc.Result, nil
 }
 
 func (e *Executor) buildTransactOpts(ctx context.Context) (*bind.TransactOpts, error) {
@@ -199,13 +299,12 @@ func (e *Executor) buildTransactOpts(ctx context.Context) (*bind.TransactOpts, e
 		return nil, fmt.Errorf("pending nonce: %w", err)
 	}
 
-	// EIP-1559 pricing
 	head, err := e.client.HeaderByNumber(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("latest header: %w", err)
 	}
 	baseFee := head.BaseFee
-	tip := big.NewInt(1_000_000) // 0.001 gwei tip on Base is sufficient
+	tip := big.NewInt(1_000_000) // 0.001 gwei tip — sufficient on Base
 	feeCap := new(big.Int).Add(
 		new(big.Int).Mul(baseFee, big.NewInt(2)),
 		tip,

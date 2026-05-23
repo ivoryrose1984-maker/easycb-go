@@ -11,8 +11,13 @@ import (
 
 // Config holds all runtime configuration.
 type Config struct {
-	// RPC — rotate through these to reduce rate-limit fingerprint
+	// RPC — rotate through these to reduce rate-limit fingerprint.
+	// Include a wss:// URL to enable event-driven block subscriptions.
 	RPCURLs []string `mapstructure:"rpc_urls"`
+
+	// Private builder endpoints for off-mempool tx submission (eth_sendRawTransaction).
+	// If empty, falls back to public mempool via the first RPC.
+	BuilderURLs []string `mapstructure:"builder_urls"`
 
 	// Wallet
 	PrivateKey string `mapstructure:"private_key"`
@@ -61,6 +66,12 @@ func Load() (*Config, error) {
 
 	// Defaults
 	v.SetDefault("rpc_urls", []string{"https://mainnet.base.org"})
+	v.SetDefault("builder_urls", []string{
+		"https://rpc.flashbots.net",
+		"https://rpc.titanbuilder.xyz",
+		"https://rpc.beaverbuild.org",
+		"https://rsync-builder.xyz",
+	})
 	v.SetDefault("min_profit_usdc", 5_000_000)  // $5
 	v.SetDefault("gas_limit_arb", 600_000)
 	v.SetDefault("max_gas_gwei", 5.0)

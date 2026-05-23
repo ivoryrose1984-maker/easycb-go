@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ivoryrose1984-maker/easycb-go/arbitrage/config"
@@ -102,6 +103,7 @@ func main() {
 		cfg.PrivateKey,
 		cfg.GasLimitArb,
 		big.NewInt(BaseChainID),
+		cfg.BuilderURLs,
 		logger,
 	)
 	if err != nil {
@@ -122,15 +124,82 @@ func main() {
 	loanMin := new(big.Int).Mul(big.NewInt(1_000),   big.NewInt(1_000_000))
 	loanMax := new(big.Int).Mul(big.NewInt(100_000), big.NewInt(1_000_000))
 
-	// ── Main scan loop ───────────────────────────────────────────────────────
-	ticker := time.NewTicker(cfg.ScanInterval)
-	defer ticker.Stop()
+	// ── Scan trigger: WebSocket block headers (preferred) or polling ticker ──
+	// scanTrigger receives the block number on each new block.
+	// Value 0 means we're in polling mode and need to fetch the block ourselves.
+	scanTrigger := make(chan uint64, 1)
+
+	var wssConnected bool
+	for _, url := range cfg.RPCURLs {
+		if !strings.HasPrefix(url, "wss://") && !strings.HasPrefix(url, "ws://") {
+			continue
+		}
+		wssClient, err := ethclient.DialContext(ctx, url)
+		if err != nil {
+			logger.Warn("WSS dial failed, trying next", zap.String("url", url), zap.Error(err))
+			continue
+		}
+		headers := make(chan *ethtypes.Header, 1)
+		sub, err := wssClient.SubscribeNewHead(ctx, headers)
+		if err != nil {
+			wssClient.Close()
+			logger.Warn("WSS subscription failed, trying next", zap.String("url", url), zap.Error(err))
+			continue
+		}
+		wssConnected = true
+		logger.Info("WebSocket block subscription active — event-driven mode",
+			zap.String("url", url),
+		)
+		go func() {
+			defer wssClient.Close()
+			defer sub.Unsubscribe()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case err := <-sub.Err():
+					logger.Warn("WSS subscription dropped, falling back to poll", zap.Error(err))
+					// Signal the main loop to keep running; ticker goroutine will take over
+					return
+				case h := <-headers:
+					select {
+					case scanTrigger <- h.Number.Uint64():
+					default: // previous scan still in progress — skip this block
+					}
+				}
+			}
+		}()
+		break
+	}
+
+	if !wssConnected {
+		logger.Info("no WSS URL in rpc_urls — falling back to poll",
+			zap.Duration("interval", cfg.ScanInterval),
+		)
+		ticker := time.NewTicker(cfg.ScanInterval)
+		defer ticker.Stop()
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					select {
+					case scanTrigger <- 0: // 0 = fetch block number inline
+					default:
+					}
+				}
+			}
+		}()
+	}
 
 	var scanCount uint64
 	logger.Info("bot LIVE — scanning for profitable cycles",
 		zap.String("base_token", "USDC"),
 		zap.String("loan_range", "$1K–$100K (ternary optimized)"),
 		zap.Int64("min_profit_usdc_units", cfg.MinProfitUSDC),
+		zap.Bool("event_driven", wssConnected),
+		zap.Int("builders", len(cfg.BuilderURLs)),
 	)
 	arblogger.TelegramStartup()
 
@@ -185,7 +254,7 @@ func main() {
 			logger.Info("shutting down")
 			return
 
-		case <-ticker.C:
+		case blockNum := <-scanTrigger:
 			scanCount++
 
 			// Rotate RPC every N scans (anti-detection)
@@ -204,16 +273,19 @@ func main() {
 				}()
 			}
 
-			// Random jitter (anti-detection)
-			if cfg.MaxJitterMS > 0 {
-				jitter := time.Duration(rand.Intn(cfg.MaxJitterMS)) * time.Millisecond
-				time.Sleep(jitter)
-			}
-
-			// Fetch current block number once per scan for quote freshness gating
+			// In polling mode blockNum is 0 — fetch it now.
+			// In event-driven mode we already have it from the subscription.
 			var currentBlock uint64
-			if blk, err := nextClient().BlockNumber(ctx); err == nil {
-				currentBlock = blk
+			if blockNum > 0 {
+				currentBlock = blockNum
+			} else {
+				// Polling mode: small random jitter to spread RPC load
+				if cfg.MaxJitterMS > 0 {
+					time.Sleep(time.Duration(rand.Intn(cfg.MaxJitterMS)) * time.Millisecond)
+				}
+				if blk, err := nextClient().BlockNumber(ctx); err == nil {
+					currentBlock = blk
+				}
 			}
 
 			// Find cycles at min loan first (fast probe)
