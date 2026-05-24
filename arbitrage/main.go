@@ -119,10 +119,10 @@ func main() {
 
 	minProfit := big.NewInt(cfg.MinProfitUSDC)
 
-	// Loan size range for ternary search: $1K → $100K
+	// Loan size range for ternary search: $1K → $50K
 	// Gas is ~$0.05 fixed — profit scales linearly with loan size until slippage bites.
-	loanMin := new(big.Int).Mul(big.NewInt(1_000),   big.NewInt(1_000_000))
-	loanMax := new(big.Int).Mul(big.NewInt(100_000), big.NewInt(1_000_000))
+	loanMin := new(big.Int).Mul(big.NewInt(1_000),  big.NewInt(1_000_000))
+	loanMax := new(big.Int).Mul(big.NewInt(50_000), big.NewInt(1_000_000))
 
 	// ── Scan trigger: WebSocket block headers (preferred) or polling ticker ──
 	// scanTrigger receives the block number on each new block.

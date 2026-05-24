@@ -96,7 +96,7 @@ export const CONFIG = {
 
   // Loan sizing — large enough for L2 gas economics to make sense
   MIN_LOAN_USDC:    1_000n * 1_000_000n,
-  MAX_LOAN_USDC: 100_000n * 1_000_000n,
+  MAX_LOAN_USDC:  50_000n * 1_000_000n,
   LOAN_STEP_USDC:   1_000n * 1_000_000n,
   MAX_TERNARY_ITERS: 8,
 
