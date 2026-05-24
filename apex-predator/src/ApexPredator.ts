@@ -14,6 +14,10 @@ import CONFIG, { usdcToUsd, weiToEth } from './config/constants';
 const envFile = process.env.NODE_ENV === 'production' ? '.env.mainnet' : '.env.testnet';
 dotenv.config({ path: envFile });
 
+// Safe default: live execution requires DRY_RUN=false explicitly.
+// Absent, undefined, or any other value keeps the bot in dry-run mode.
+const DRY_RUN = process.env.DRY_RUN !== 'false';
+
 let circuitBreakerTriggered = false;
 let initialBalance:          bigint | null = null;
 
@@ -50,7 +54,7 @@ function getPairList(): Array<{ tokenIn: string; tokenOut: string; name: string 
 
 async function main() {
   console.log('Apex Predator MEV Bot Starting...');
-  console.log(`Chain: ${CONFIG.CHAIN_ID} | Mode: ${process.env.DRY_RUN === 'true' ? 'DRY RUN' : 'LIVE'}`);
+  console.log(`Chain: ${CONFIG.CHAIN_ID} | Mode: ${DRY_RUN ? 'DRY RUN' : 'LIVE'}`);
   console.log(`Env: ${envFile}`);
 
   initSupabase();
@@ -162,7 +166,7 @@ async function scanAllOpportunities(
     if (triOpps.length > 0) {
       const best = triOpps[0];
       console.log(`[TRIANGULAR] Best: score=${best.profitResult.score} bps, profit=$${usdcToUsd(best.expectedProfit).toFixed(2)}, loan=$${usdcToUsd(triangularResults.optimalAmount).toFixed(0)}`);
-      if (process.env.DRY_RUN !== 'true') {
+      if (!DRY_RUN) {
         await executeArbitrage(provider, wallet, apexContract, {
           tokenIn:      best.tokens[0],
           tokenOut:     best.tokens[1],
@@ -369,7 +373,7 @@ async function scanPair(
 
     console.log(`[OPPORTUNITY] ${pair.name}: ${profitResult.score} bps, $${usdcToUsd(profitResult.netProfit).toFixed(2)}`);
 
-    if (process.env.DRY_RUN === 'true') {
+    if (DRY_RUN) {
       console.log(`[DRY_RUN] Would execute ${pair.name}`);
       alertProfit(profitResult.netProfit);
       return true;

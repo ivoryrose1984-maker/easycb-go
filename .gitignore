@@ -23,12 +23,17 @@ go.work.sum
 
 # env files — never commit real credentials
 .env
+.env.*
 .env.local
+.env.testnet
 .env.mainnet
 .env.production
 apex-predator/.env
+apex-predator/.env.*
 arbitrage/.env
+arbitrage/.env.*
 dashboard/.env
+dashboard/.env.*
 dashboard/.env.local
 
 # Built binaries
