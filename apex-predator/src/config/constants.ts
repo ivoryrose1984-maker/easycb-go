@@ -130,6 +130,9 @@ export const CONFIG = {
 
   FLASH_LOAN_FEE_BPS: 0,  // Balancer V2 charges 0% — no fee deduction needed
 
+  LATENCY_BUFFER_BPS:  5,  // Atlas: execution arrives ~1 block late, eat 5bps
+  FAILURE_BUFFER_BPS:  5,  // Atlas: ~5% of attempts fail, amortised as 5bps cost
+
   TELEGRAM_MIN_PROFIT_USD:    5,
   TELEGRAM_ALERT_COOLDOWN_MS: 60_000,
 

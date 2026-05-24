@@ -58,7 +58,8 @@ describe('calculateNetProfit', () => {
     // net = 10_000_000 - 787_500 - 1_300_000 = 7_912_500 micro-USDC = $7.91
     const grossProfit = 10_000_000n;
     const priorityBudget = (grossProfit * BigInt(gasForecast.dynamicPriorityPct)) / 100n;
-    const expectedNet = grossProfit - expectedGasUsdc - priorityBudget;
+    const bufferUsdc = (amountIn * (5n + 5n)) / 10_000n; // LATENCY_BUFFER_BPS + FAILURE_BUFFER_BPS
+    const expectedNet = grossProfit - expectedGasUsdc - priorityBudget - bufferUsdc;
     expect(res.netProfit).toBe(expectedNet);
   });
 
@@ -73,10 +74,10 @@ describe('calculateNetProfit', () => {
 
   it('shouldExecute is true when net profit >= MIN_PROFIT_BPS', () => {
     const amountIn  = 50_000n * USDC_DEC; // $50K loan
-    // 0.3% spread on $50K = $150 gross.
-    // priority = 13% of $150 = $19.50, gas = $0.79
-    // net = $150 - $19.50 - $0.79 = $129.71 → score = 129_712_500 * 10000 / 50_000_000_000 = 25 bps >= 20
-    const sellQuote = amountIn + 150_000_000n;
+    // 0.5% spread on $50K = $250 gross.
+    // priority = 13% of $250 = $32.50, gas = $0.79, buffers = 10bps of $50K = $50
+    // net = $250 - $32.50 - $0.79 - $50 = $166.71 → score = 33 bps >= 20
+    const sellQuote = amountIn + 250_000_000n;
     const res = calculateNetProfit(amountIn, 16_666_000_000_000_000_000n, sellQuote, gasForecast, ETH_PRICE);
     expect(res.netProfit).toBeGreaterThan(0n);
     expect(res.shouldExecute).toBe(true);
@@ -91,7 +92,8 @@ describe('calculateNetProfit', () => {
     // netProfit must NOT include any flash loan fee deduction
     const gross = BigInt(grossOut);
     const priorityBudget = (gross * BigInt(gasForecast.dynamicPriorityPct)) / 100n;
-    const expectedNet = gross - expectedGasUsdc - priorityBudget;
+    const bufferUsdc = (amountIn * (5n + 5n)) / 10_000n; // LATENCY_BUFFER_BPS + FAILURE_BUFFER_BPS
+    const expectedNet = gross - expectedGasUsdc - priorityBudget - bufferUsdc;
     expect(res.netProfit).toBe(expectedNet);
   });
 

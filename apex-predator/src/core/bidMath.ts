@@ -35,7 +35,9 @@ export function calculateNetProfit(
     ? (grossProfit * priorityFeePct) / 100n
     : 0n;
 
-  const netProfit = grossProfit - flashLoanFee - gasCostUsdc - priorityBudgetUsdc;
+  const netProfit = grossProfit - flashLoanFee - gasCostUsdc - priorityBudgetUsdc
+                  - (amountIn > 0n ? (amountIn * BigInt(CONFIG.LATENCY_BUFFER_BPS)) / 10_000n : 0n)
+                  - (amountIn > 0n ? (amountIn * BigInt(CONFIG.FAILURE_BUFFER_BPS)) / 10_000n : 0n);
 
   const score = amountIn > 0n
     ? Number((netProfit * 10_000n) / amountIn)
