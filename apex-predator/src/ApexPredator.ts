@@ -2,7 +2,7 @@
 import { ethers } from 'ethers';
 import * as dotenv from 'dotenv';
 import { createWsProvider } from './infrastructure/wsProvider';
-import { initSupabase, logOpportunity, logTrade } from './infrastructure/supabaseLogger';
+import { initSupabase, logOpportunity, logTrade, logRejection, REJECTION } from './infrastructure/supabaseLogger';
 import { getGasForecast } from './infrastructure/gasForecaster';
 import { initTelegram, alertProfit, alertCircuitBreaker, alertError, sendAlert } from './infrastructure/telegramAlert';
 import { calculateNetProfit, findOptimalLoanSize } from './core/bidMath';
@@ -92,7 +92,10 @@ async function main() {
   console.log('\nBot LIVE — listening for opportunities\n');
 
   provider.on('pending', () => {
-    if (circuitBreakerTriggered) return;
+    if (circuitBreakerTriggered) {
+      logRejection({ timestamp: new Date().toISOString(), pair: 'all', loan_amount: '0', reason_code: REJECTION.CIRCUIT_BREAKER_OPEN, net_profit_wei: '0' });
+      return;
+    }
 
     const now           = Date.now();
     const sinceLastExec = now - lastExecutionTime;
@@ -234,7 +237,10 @@ async function scanPair(
       const out: bigint = buyQuotes[i]?.[0] ?? 0n;
       if (out > bestBuyOut) { bestBuyOut = out; buyFee = FEE_TIERS[i]; }
     }
-    if (bestBuyOut === 0n) return false;
+    if (bestBuyOut === 0n) {
+      logRejection({ timestamp: new Date().toISOString(), pair: pair.name, loan_amount: '0', reason_code: REJECTION.NO_BUY_QUOTE, net_profit_wei: '0' });
+      return false;
+    }
 
     // Best sell = most tokenIn back (from a DIFFERENT fee tier — that's where the arb lives)
     const sellQuotes = await Promise.all(FEE_TIERS.filter(f => f !== buyFee).map(fee =>
@@ -250,7 +256,10 @@ async function scanPair(
       const out: bigint = sellQuotes[i]?.[0] ?? 0n;
       if (out > bestSellOut) { bestSellOut = out; sellFee = sellFeeTiers[i]; }
     }
-    if (bestSellOut === 0n) return false;
+    if (bestSellOut === 0n) {
+      logRejection({ timestamp: new Date().toISOString(), pair: pair.name, loan_amount: '0', reason_code: REJECTION.NO_SELL_QUOTE, net_profit_wei: '0' });
+      return false;
+    }
 
     const [buyOnDex, sellOnDex, buyRouter, sellRouter] = [
       `uni-${buyFee}`, `uni-${sellFee}`, CONFIG.UNI_ROUTER, CONFIG.UNI_ROUTER,
@@ -261,13 +270,18 @@ async function scanPair(
       ? Number(((probeReceived - probe) * 10_000n) / probe)
       : 0;
 
-    if (spreadBps < CONFIG.MIN_PROFIT_BPS) return false; // no spread, skip size search
+    if (spreadBps < CONFIG.MIN_PROFIT_BPS) {
+      logRejection({ timestamp: new Date().toISOString(), pair: pair.name, loan_amount: probe.toString(), reason_code: REJECTION.SPREAD_TOO_THIN, net_profit_wei: '0' });
+      return false;
+    }
 
     const validation = await validateOpportunity(
       provider, pair.tokenIn, pair.tokenOut, probe, spreadBps, ethPrice
     );
     if (!validation.valid) {
       if (CONFIG.LOG_LEVEL === 'debug') console.log(`[FILTER] ${pair.name}: ${validation.reason}`);
+      const rc = validation.reason?.toLowerCase().includes('blacklist') ? REJECTION.BLACKLISTED : REJECTION.INSUFFICIENT_LIQUIDITY;
+      logRejection({ timestamp: new Date().toISOString(), pair: pair.name, loan_amount: probe.toString(), reason_code: rc, net_profit_wei: '0' });
       return false;
     }
 
@@ -283,7 +297,10 @@ async function scanPair(
       const edgeMinusCosts     = BigInt(spreadBps) - variableCostBps;
       if (edgeMinusCosts > 0n) {
         const loanFloor = ((TARGET_PROFIT_USDC + gasCostUsdc) * 10_000n) / edgeMinusCosts;
-        if (loanFloor > CONFIG.MAX_LOAN_USDC) return false; // spread too thin at max loan — skip
+        if (loanFloor > CONFIG.MAX_LOAN_USDC) {
+          logRejection({ timestamp: new Date().toISOString(), pair: pair.name, loan_amount: CONFIG.MAX_LOAN_USDC.toString(), reason_code: REJECTION.LOAN_FLOOR_EXCEEDED, net_profit_wei: '0' });
+          return false;
+        }
       }
     }
     // ─────────────────────────────────────────────────────────────────────────
@@ -310,14 +327,20 @@ async function scanPair(
       tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
       amountIn, fee: buyFee, sqrtPriceLimitX96: 0,
     }).catch(() => null);
-    if (!finalBuyRaw) return false;
+    if (!finalBuyRaw) {
+      logRejection({ timestamp: new Date().toISOString(), pair: pair.name, loan_amount: amountIn.toString(), reason_code: REJECTION.STALE_FINAL_QUOTE, net_profit_wei: '0' });
+      return false;
+    }
     const tokenOutBought: bigint = finalBuyRaw[0];
 
     const finalSellRaw = await quoter.quoteExactInputSingle.staticCall({
       tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
       amountIn: tokenOutBought, fee: sellFee, sqrtPriceLimitX96: 0,
     }).catch(() => null);
-    if (!finalSellRaw) return false;
+    if (!finalSellRaw) {
+      logRejection({ timestamp: new Date().toISOString(), pair: pair.name, loan_amount: amountIn.toString(), reason_code: REJECTION.STALE_FINAL_QUOTE, net_profit_wei: '0' });
+      return false;
+    }
     const tokenInReceived: bigint = finalSellRaw[0];
 
     logOpportunity({
@@ -340,6 +363,7 @@ async function scanPair(
       if (CONFIG.LOG_LEVEL === 'debug') {
         console.log(`[PROFIT] ${pair.name}: ${profitResult.score} bps (need ${CONFIG.MIN_PROFIT_BPS})`);
       }
+      logRejection({ timestamp: new Date().toISOString(), pair: pair.name, loan_amount: amountIn.toString(), reason_code: REJECTION.BELOW_PROFIT_THRESHOLD, net_profit_wei: profitResult.netProfit.toString() });
       return false;
     }
 
@@ -364,6 +388,7 @@ async function scanPair(
 
   } catch (error: any) {
     if (CONFIG.LOG_LEVEL === 'debug') console.error(`[SCAN] ${pair.name}:`, error.message);
+    logRejection({ timestamp: new Date().toISOString(), pair: pair.name, loan_amount: '0', reason_code: REJECTION.EXCEPTION, net_profit_wei: '0' });
     return false;
   }
 }

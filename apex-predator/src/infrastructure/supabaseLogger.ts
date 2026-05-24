@@ -36,6 +36,27 @@ export interface TradeLog {
   status:            'pending' | 'included' | 'failed' | 'reverted';
 }
 
+export const REJECTION = {
+  NO_BUY_QUOTE:           'NO_BUY_QUOTE',
+  NO_SELL_QUOTE:          'NO_SELL_QUOTE',
+  SPREAD_TOO_THIN:        'SPREAD_TOO_THIN',
+  BLACKLISTED:            'BLACKLISTED',
+  INSUFFICIENT_LIQUIDITY: 'INSUFFICIENT_LIQUIDITY',
+  LOAN_FLOOR_EXCEEDED:    'LOAN_FLOOR_EXCEEDED',
+  STALE_FINAL_QUOTE:      'STALE_FINAL_QUOTE',
+  BELOW_PROFIT_THRESHOLD: 'BELOW_PROFIT_THRESHOLD',
+  CIRCUIT_BREAKER_OPEN:   'CIRCUIT_BREAKER_OPEN',
+  EXCEPTION:              'EXCEPTION',
+} as const;
+
+export interface RejectionLog {
+  timestamp:     string;
+  pair:          string;
+  loan_amount:   string;
+  reason_code:   string;
+  net_profit_wei:string;
+}
+
 interface BuilderStatsLog {
   builder_name:     string;
   success:          boolean;
@@ -99,6 +120,14 @@ export function logTrade(trade: Partial<TradeLog>): void {
       ...trade, created_at: new Date().toISOString(),
     });
     if (error) console.error('[SUPABASE] logTrade:', error.message);
+  });
+}
+
+export function logRejection(r: RejectionLog): void {
+  fireAndForget(async () => {
+    const { error } = await getClient().from('opportunity_rejections').insert(r);
+    if (error && CONFIG.LOG_LEVEL === 'debug')
+      console.error('[SUPABASE] logRejection:', error.message);
   });
 }
 
@@ -174,4 +203,4 @@ function sumField(arr: any[] | null, key: string): number {
   return arr.reduce((s, item) => s + (parseFloat(item[key]) || 0), 0);
 }
 
-export default { initSupabase, logOpportunity, logTrade, logBuilderStats, fetchBlacklist, getBotStats };
+export default { initSupabase, logOpportunity, logTrade, logRejection, logBuilderStats, fetchBlacklist, getBotStats };
