@@ -271,6 +271,23 @@ async function scanPair(
       return false;
     }
 
+    // ── Atlas loan floor ──────────────────────────────────────────────────────
+    // minimum_loan = (target_profit_usd + gas_cost_usd) / ((edge_bps - variable_cost_bps) / 10000)
+    // If the floor exceeds MAX_LOAN_USDC, this spread can't yield target profit at any loan size.
+    {
+      const gasCostUsdc = (CONFIG.GAS_ESTIMATE *
+        (gasForecast.predictedBaseFee + CONFIG.MIN_PRIORITY_FEE_GWEI * 1_000_000_000n) *
+        ethPrice) / (10n ** 18n);
+      const TARGET_PROFIT_USDC = 5_000_000n;                         // $5 floor
+      const variableCostBps    = BigInt(CONFIG.FLASH_LOAN_FEE_BPS) + 10n; // fee + ~10bps slippage
+      const edgeMinusCosts     = BigInt(spreadBps) - variableCostBps;
+      if (edgeMinusCosts > 0n) {
+        const loanFloor = ((TARGET_PROFIT_USDC + gasCostUsdc) * 10_000n) / edgeMinusCosts;
+        if (loanFloor > CONFIG.MAX_LOAN_USDC) return false; // spread too thin at max loan — skip
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // Spread confirmed — find optimal loan size via ternary search (8 iterations, $1K–$100K)
     const { optimalAmount: amountIn, maxProfit: profitResult } = await findOptimalLoanSize(
       async (size) => {
