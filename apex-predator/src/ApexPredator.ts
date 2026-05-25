@@ -1,6 +1,6 @@
 // src/ApexPredator.ts
-import { ethers } from 'ethers';
 import * as dotenv from 'dotenv';
+import { ethers } from 'ethers';
 import { createWsProvider } from './infrastructure/wsProvider';
 import { initSupabase, logOpportunity, logTrade, logRejection, REJECTION } from './infrastructure/supabaseLogger';
 import { getGasForecast } from './infrastructure/gasForecaster';
@@ -8,11 +8,10 @@ import { initTelegram, alertProfit, alertCircuitBreaker, alertError, sendAlert }
 import { calculateNetProfit, findOptimalLoanSize } from './core/bidMath';
 import { validateOpportunity } from './core/filters';
 import { submitBundleWithFailover } from './core/bundleSubmitter';
-import { encode2HopPath, findTriangularOpportunities } from './core/triangularFinder';
+import { encode2HopPath, findTriangularOpportunities, TriangularPath } from './core/triangularFinder';
 import CONFIG, { usdcToUsd, weiToEth } from './config/constants';
 
-const envFile = process.env.NODE_ENV === 'production' ? '.env.mainnet' : '.env.testnet';
-dotenv.config({ path: envFile });
+dotenv.config({ path: process.env.NODE_ENV === 'production' ? '.env.mainnet' : '.env.testnet' });
 
 // Safe default: live execution requires DRY_RUN=false explicitly.
 // Absent, undefined, or any other value keeps the bot in dry-run mode.
@@ -25,9 +24,6 @@ let cachedEthPrice:    bigint | null = null;
 let lastEthPriceUpdate = 0;
 
 const pendingOpportunities = new Set<string>();
-
-let debounceTimer:    NodeJS.Timeout | null = null;
-let lastExecutionTime = 0;
 
 // All pairs to scan on every cycle — more pairs = more opportunities
 function getPairList(): Array<{ tokenIn: string; tokenOut: string; name: string }> {
@@ -55,7 +51,12 @@ function getPairList(): Array<{ tokenIn: string; tokenOut: string; name: string 
 async function main() {
   console.log('Apex Predator MEV Bot Starting...');
   console.log(`Chain: ${CONFIG.CHAIN_ID} | Mode: ${DRY_RUN ? 'DRY RUN' : 'LIVE'}`);
-  console.log(`Env: ${envFile}`);
+  console.log(`Env: ${process.env.NODE_ENV === 'production' ? '.env.mainnet' : '.env.testnet'}`);
+
+  if (!process.env.APEX_FLASH_LOAN_BASE) {
+    console.error('FATAL: APEX_FLASH_LOAN_BASE not set');
+    process.exit(1);
+  }
 
   initSupabase();
   await initTelegram();
@@ -95,26 +96,12 @@ async function main() {
   console.log(`[PAIRS] Scanning ${pairs.length} pairs: ${pairs.map(p => p.name).join(', ')}`);
   console.log('\nBot LIVE — listening for opportunities\n');
 
-  provider.on('pending', () => {
+  provider.on('block', () => {
     if (circuitBreakerTriggered) {
       logRejection({ timestamp: new Date().toISOString(), pair: 'all', loan_amount: '0', reason_code: REJECTION.CIRCUIT_BREAKER_OPEN, net_profit_wei: '0' });
       return;
     }
-
-    const now           = Date.now();
-    const sinceLastExec = now - lastExecutionTime;
-
-    if (sinceLastExec >= CONFIG.MIN_EXEC_INTERVAL_MS) {
-      if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
-      lastExecutionTime = now;
-      scanAllOpportunities(provider, wallet, quoter, apexContract, pairs);
-    } else if (!debounceTimer) {
-      debounceTimer = setTimeout(() => {
-        debounceTimer     = null;
-        lastExecutionTime = Date.now();
-        scanAllOpportunities(provider, wallet, quoter, apexContract, pairs);
-      }, CONFIG.MIN_EXEC_INTERVAL_MS - sinceLastExec);
-    }
+    scanAllOpportunities(provider, wallet, quoter, apexContract, pairs);
   });
 
   setInterval(() => checkCircuitBreaker(provider, wallet.address), 30_000);
@@ -147,24 +134,25 @@ async function scanAllOpportunities(
     if (!ethPrice) { pendingOpportunities.delete(cycleId); return; }
 
     // Scan all 2-leg pairs + triangular in parallel
+    let bestTriOpps: TriangularPath[] = [];
+
     const [pairResults, triangularResults] = await Promise.all([
       Promise.allSettled(pairs.map(pair =>
         scanPair(provider, wallet, quoter, apexContract, pair, gasForecast, ethPrice)
       )),
       findOptimalLoanSize(async (size) => {
         const opps = await findTriangularOpportunities(provider, CONFIG.UNI_QUOTER_V2, size, gasForecast, ethPrice);
-        return opps.length > 0 ? opps[0].profitResult : calculateNetProfit(size, 0n, 0n, gasForecast, ethPrice);
+        if (opps.length > 0) {
+          bestTriOpps = opps;
+          return opps[0].profitResult;
+        }
+        return calculateNetProfit(size, 0n, 0n, gasForecast, ethPrice);
       }),
     ]);
 
-    // triangularResults is now { optimalAmount, maxProfit } from ternary search
-    const triOpps = await findTriangularOpportunities(
-      provider, CONFIG.UNI_QUOTER_V2, triangularResults.optimalAmount, gasForecast, ethPrice
-    );
-
     // Execute best triangular opportunity if found
-    if (triOpps.length > 0) {
-      const best = triOpps[0];
+    if (bestTriOpps.length > 0) {
+      const best = bestTriOpps[0];
       console.log(`[TRIANGULAR] Best: score=${best.profitResult.score} bps, profit=$${usdcToUsd(best.expectedProfit).toFixed(2)}, loan=$${usdcToUsd(triangularResults.optimalAmount).toFixed(0)}`);
       if (!DRY_RUN) {
         await executeArbitrage(provider, wallet, apexContract, {
