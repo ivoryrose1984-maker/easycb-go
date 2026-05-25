@@ -9,8 +9,6 @@
 //   pm2 monit                               # live CPU/memory dashboard
 //   pm2 save                                # save process list (survives reboots)
 
-require('dotenv').config({ path: './apex-predator/.env' });
-
 module.exports = {
   apps: [
     {
@@ -18,7 +16,7 @@ module.exports = {
       script: 'dist/ApexPredator.js',
       cwd: './apex-predator',
       interpreter: 'node',
-      env_file: './apex-predator/.env',
+      env_file: './apex-predator/.env.testnet',
       instances: 1,
       autorestart: true,
       watch: false,
