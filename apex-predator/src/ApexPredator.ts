@@ -57,6 +57,10 @@ async function main() {
     console.error('FATAL: APEX_FLASH_LOAN_BASE not set');
     process.exit(1);
   }
+  if (!DRY_RUN && CONFIG.APEX_FLASH_LOAN === '0x0000000000000000000000000000000000000000') {
+    console.error('FATAL: APEX_FLASH_LOAN_BASE is zero address — deploy contract before going live');
+    process.exit(1);
+  }
 
   initSupabase();
   await initTelegram();
