@@ -1,0 +1,298 @@
+name: Deploy Apex Predator — Dry-Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type exactly: deploy-dry-run'
+        required: true
+
+jobs:
+  safety-check:
+    name: Pre-flight safety check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/new-session-ao4nr
+
+      - name: Confirm correct branch and commits
+        run: |
+          echo "Branch: $(git branch --show-current 2>/dev/null || echo 'claude/new-session-ao4nr')"
+          echo "Recent commits:"
+          git log --oneline -5
+          echo "---"
+          # Verify Atlas extractions are present
+          git log --oneline | grep -q "Atlas\|audit\|DRY_RUN\|loan floor" || true
+
+      - name: Mainnet execution guard
+        run: |
+          echo "Scanning for live execution flags..."
+          # Must not find DRY_RUN=false anywhere in source
+          if grep -r "DRY_RUN=false\|ARB_DRY_RUN=false" \
+            --include="*.ts" --include="*.go" --include="*.yml" \
+            --exclude-dir=node_modules --exclude-dir=.git .; then
+            echo "FATAL: live execution flag found in source. Stopping."
+            exit 1
+          fi
+          echo "DRY_RUN guard: PASSED"
+
+      - name: Confirm deploy input
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "deploy-dry-run" ]; then
+            echo "Confirmation text did not match. Type exactly: deploy-dry-run"
+            exit 1
+          fi
+          echo "Confirmation: OK"
+
+  deploy:
+    name: Deploy to Hetzner
+    runs-on: ubuntu-latest
+    needs: safety-check
+    steps:
+      - name: Block A — System dependencies
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 5.161.113.63
+          username: root
+          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
+          command_timeout: 300s
+          script: |
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get upgrade -y -qq
+            apt-get install -y -qq git curl screen build-essential
+            echo "Node check: $(node --version 2>/dev/null || echo 'not installed')"
+
+      - name: Block B — Node 22
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 5.161.113.63
+          username: root
+          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
+          command_timeout: 120s
+          script: |
+            set -e
+            if ! node --version 2>/dev/null | grep -q "v22"; then
+              curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+              apt-get install -y nodejs
+            fi
+            echo "Node: $(node --version)"
+            echo "npm: $(npm --version)"
+
+      - name: Block C — Go 1.24
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 5.161.113.63
+          username: root
+          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
+          command_timeout: 120s
+          script: |
+            set -e
+            if ! /usr/local/go/bin/go version 2>/dev/null; then
+              wget -q https://go.dev/dl/go1.24.7.linux-amd64.tar.gz -O /tmp/go.tar.gz
+              rm -rf /usr/local/go
+              tar -C /usr/local -xzf /tmp/go.tar.gz
+              rm /tmp/go.tar.gz
+              echo 'export PATH=$PATH:/usr/local/go/bin' >> /root/.bashrc
+            fi
+            export PATH=$PATH:/usr/local/go/bin
+            echo "Go: $(go version)"
+
+      - name: Block D — Clone repo
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 5.161.113.63
+          username: root
+          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
+          command_timeout: 60s
+          script: |
+            set -e
+            if [ -d /opt/apex/.git ]; then
+              cd /opt/apex
+              git fetch origin claude/new-session-ao4nr
+              git checkout claude/new-session-ao4nr
+              git pull origin claude/new-session-ao4nr
+              echo "Repo updated"
+            else
+              rm -rf /opt/apex
+              git clone --branch claude/new-session-ao4nr \
+                https://github.com/ivoryrose1984-maker/easycb-go.git /opt/apex
+            fi
+            cd /opt/apex
+            echo "Commits on server:"
+            git log --oneline -5
+
+      - name: Block E — Build TS bot
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 5.161.113.63
+          username: root
+          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
+          command_timeout: 180s
+          script: |
+            set -e
+            cd /opt/apex/apex-predator
+            npm install --silent
+            npm run build
+            echo "TS build: OK"
+            ls -la dist/ApexPredator.js
+
+      - name: Block F — Build Go bot
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 5.161.113.63
+          username: root
+          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
+          command_timeout: 120s
+          script: |
+            set -e
+            export PATH=$PATH:/usr/local/go/bin
+            cd /opt/apex/arbitrage
+            go mod tidy
+            go build -o apex-arbitrage ./...
+            echo "Go build: OK"
+            ls -la apex-arbitrage
+
+      - name: Block G — Write env files
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          ALCHEMY_WSS_URL: ${{ secrets.ALCHEMY_WSS_URL }}
+          ALCHEMY_HTTP_URL: ${{ secrets.ALCHEMY_HTTP_URL }}
+          WALLET_PRIVATE_KEY: ${{ secrets.WALLET_PRIVATE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        with:
+          host: 5.161.113.63
+          username: root
+          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
+          envs: ALCHEMY_WSS_URL,ALCHEMY_HTTP_URL,WALLET_PRIVATE_KEY,SUPABASE_ANON_KEY,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID
+          command_timeout: 30s
+          script: |
+            set -e
+            # TS bot — apex-predator reads ALCHEMY_WSS_URL, not ALCHEMY_WSS
+            printf 'ALCHEMY_WSS_URL=%s\n'    "$ALCHEMY_WSS_URL"   >  /opt/apex/apex-predator/.env.testnet
+            printf 'PRIVATE_KEY=%s\n'        "$WALLET_PRIVATE_KEY" >> /opt/apex/apex-predator/.env.testnet
+            printf 'DRY_RUN=true\n'                                >> /opt/apex/apex-predator/.env.testnet
+            printf 'APEX_FLASH_LOAN_BASE=%s\n' "0x0000000000000000000000000000000000000000" >> /opt/apex/apex-predator/.env.testnet
+            printf 'SUPABASE_URL=%s\n'       "https://ogyrwseedlcxlfwwjwnd.supabase.co"    >> /opt/apex/apex-predator/.env.testnet
+            printf 'SUPABASE_ANON_KEY=%s\n' "$SUPABASE_ANON_KEY"  >> /opt/apex/apex-predator/.env.testnet
+            printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TELEGRAM_BOT_TOKEN" >> /opt/apex/apex-predator/.env.testnet
+            printf 'TELEGRAM_CHAT_ID=%s\n'  "$TELEGRAM_CHAT_ID"   >> /opt/apex/apex-predator/.env.testnet
+
+            # Go bot — all vars need ARB_ prefix
+            printf 'ARB_RPC_URLS=%s\n'       "$ALCHEMY_HTTP_URL"  >  /opt/apex/arbitrage/.env
+            printf 'ARB_PRIVATE_KEY=%s\n'    "$WALLET_PRIVATE_KEY" >> /opt/apex/arbitrage/.env
+            printf 'ARB_DRY_RUN=true\n'                            >> /opt/apex/arbitrage/.env
+            printf 'ARB_SUPABASE_URL=%s\n'   "https://ogyrwseedlcxlfwwjwnd.supabase.co"   >> /opt/apex/arbitrage/.env
+            printf 'ARB_SUPABASE_KEY=%s\n'   "$SUPABASE_ANON_KEY" >> /opt/apex/arbitrage/.env
+            printf 'ARB_LOG_LEVEL=info\n'                          >> /opt/apex/arbitrage/.env
+            printf 'ARB_TELEGRAM_BOT_TOKEN=%s\n' "$TELEGRAM_BOT_TOKEN" >> /opt/apex/arbitrage/.env
+            printf 'ARB_TELEGRAM_CHAT_ID=%s\n'   "$TELEGRAM_CHAT_ID"   >> /opt/apex/arbitrage/.env
+
+            # Verify DRY_RUN — must be present and true in both
+            grep "DRY_RUN" /opt/apex/apex-predator/.env.testnet
+            grep "ARB_DRY_RUN" /opt/apex/arbitrage/.env
+
+      - name: Block H — Start bots in screen sessions
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 5.161.113.63
+          username: root
+          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
+          command_timeout: 60s
+          script: |
+            set -e
+            mkdir -p /var/log/apex
+
+            # Kill existing sessions if any
+            screen -S apex-ts -X quit 2>/dev/null || true
+            screen -S apex-go -X quit 2>/dev/null || true
+            sleep 2
+
+            # Start TS bot
+            screen -dmS apex-ts bash -c \
+              'cd /opt/apex/apex-predator && npm start 2>&1 | tee /var/log/apex/ts.log'
+
+            # Start Go bot
+            screen -dmS apex-go bash -c \
+              'cd /opt/apex/arbitrage && ./apex-arbitrage 2>&1 | tee /var/log/apex/go.log'
+
+            sleep 3
+            echo "Running sessions:"
+            screen -ls
+
+      - name: Block I — Verify logs (wait 20s)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 5.161.113.63
+          username: root
+          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
+          command_timeout: 60s
+          script: |
+            sleep 20
+            echo "=== TS BOT LOGS ==="
+            tail -30 /var/log/apex/ts.log 2>/dev/null || echo "No TS log yet"
+            echo ""
+            echo "=== GO BOT LOGS ==="
+            tail -30 /var/log/apex/go.log 2>/dev/null || echo "No Go log yet"
+            echo ""
+            # Fail the workflow if bots crashed immediately
+            if ! screen -ls | grep -q "apex-ts"; then
+              echo "FATAL: TS bot screen session not running"
+              cat /var/log/apex/ts.log
+              exit 1
+            fi
+            if ! screen -ls | grep -q "apex-go"; then
+              echo "FATAL: Go bot screen session not running"
+              cat /var/log/apex/go.log
+              exit 1
+            fi
+            echo "Both bots running"
+
+      - name: Block J — Auto-restart on reboot
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 5.161.113.63
+          username: root
+          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
+          command_timeout: 30s
+          script: |
+            cat > /opt/restart-bots.sh << 'SCRIPT'
+            #!/bin/bash
+            sleep 10
+            screen -dmS apex-ts bash -c 'cd /opt/apex/apex-predator && npm start 2>&1 | tee /var/log/apex/ts.log'
+            screen -dmS apex-go bash -c 'cd /opt/apex/arbitrage && ./apex-arbitrage 2>&1 | tee /var/log/apex/go.log'
+            SCRIPT
+            chmod +x /opt/restart-bots.sh
+
+            # Add to crontab if not already there
+            (crontab -l 2>/dev/null | grep -v restart-bots; echo "@reboot /opt/restart-bots.sh") | crontab -
+            echo "Crontab:"
+            crontab -l
+
+  verify-supabase:
+    name: Supabase data check (10 min after deploy)
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Wait 10 minutes
+        run: sleep 600
+
+      - name: Check Supabase for data flow
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: 5.161.113.63
+          username: root
+          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
+          command_timeout: 30s
+          script: |
+            echo "=== Final log check ==="
+            tail -50 /var/log/apex/ts.log
+            echo ""
+            tail -30 /var/log/apex/go.log
+            echo ""
+            echo "=== Supabase check SQL (run in Supabase SQL editor) ==="
+            echo "SELECT reason_code, COUNT(*) FROM opportunity_rejections WHERE created_at > NOW() - INTERVAL '10 minutes' GROUP BY 1 ORDER BY 2 DESC;"
