@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/ApexPredator.js",
+    "dry-run": "npm run build && node dist/scripts/dry-run.js",
     "dev": "npm run build && npm start",
     "test": "jest --runInBand"
   },

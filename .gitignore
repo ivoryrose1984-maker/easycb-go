@@ -56,4 +56,6 @@ go.work.sum
 go.sum
 
 /.idea
-.DS_Store
+.DS_Storelogs/
+apex-predator/logs/
+*.jsonl
