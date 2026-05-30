@@ -1,4 +1,4 @@
-name: Deploy Apex Predator — Dry-Run
+name: Deploy Apex Unified — Dry-Run
 
 on:
   workflow_dispatch:
@@ -124,79 +124,62 @@ jobs:
             echo "Commits on server:"
             git log --oneline -5
 
-      - name: Block E — Build TS bot
+      - name: Block E — Build apex-unified
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: 5.161.113.63
           username: root
           password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
-          command_timeout: 180s
+          command_timeout: 300s
           script: |
             set -e
-            cd /opt/apex/apex-predator
+            cd /opt/apex/apex-unified
             npm install --silent
             npm run build
-            echo "TS build: OK"
-            ls -la dist/ApexPredator.js
+            echo "apex-unified build: OK"
+            ls -la dist/scripts/dry-run.js
 
-      - name: Block F — Build Go bot
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: 5.161.113.63
-          username: root
-          password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
-          command_timeout: 120s
-          script: |
-            set -e
-            export PATH=$PATH:/usr/local/go/bin
-            cd /opt/apex/arbitrage
-            go mod tidy
-            go build -o apex-arbitrage ./...
-            echo "Go build: OK"
-            ls -la apex-arbitrage
-
-      - name: Block G — Write env files
+      - name: Block G — Write env file
         uses: appleboy/ssh-action@v1.2.0
         env:
           ALCHEMY_WSS_URL: ${{ secrets.ALCHEMY_WSS_URL }}
-          ALCHEMY_HTTP_URL: ${{ secrets.ALCHEMY_HTTP_URL }}
-          WALLET_PRIVATE_KEY: ${{ secrets.WALLET_PRIVATE_KEY }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         with:
           host: 5.161.113.63
           username: root
           password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
-          envs: ALCHEMY_WSS_URL,ALCHEMY_HTTP_URL,WALLET_PRIVATE_KEY,SUPABASE_ANON_KEY,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID
+          envs: ALCHEMY_WSS_URL,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID
           command_timeout: 30s
           script: |
             set -e
-            # TS bot — apex-predator reads ALCHEMY_WSS_URL, not ALCHEMY_WSS
-            printf 'ALCHEMY_WSS_URL=%s\n'    "$ALCHEMY_WSS_URL"   >  /opt/apex/apex-predator/.env.testnet
-            printf 'PRIVATE_KEY=%s\n'        "$WALLET_PRIVATE_KEY" >> /opt/apex/apex-predator/.env.testnet
-            printf 'DRY_RUN=true\n'                                >> /opt/apex/apex-predator/.env.testnet
-            printf 'APEX_FLASH_LOAN_BASE=%s\n' "0x0000000000000000000000000000000000000000" >> /opt/apex/apex-predator/.env.testnet
-            printf 'SUPABASE_URL=%s\n'       "https://ogyrwseedlcxlfwwjwnd.supabase.co"    >> /opt/apex/apex-predator/.env.testnet
-            printf 'SUPABASE_ANON_KEY=%s\n' "$SUPABASE_ANON_KEY"  >> /opt/apex/apex-predator/.env.testnet
-            printf 'TELEGRAM_BOT_TOKEN=%s\n' "$TELEGRAM_BOT_TOKEN" >> /opt/apex/apex-predator/.env.testnet
-            printf 'TELEGRAM_CHAT_ID=%s\n'  "$TELEGRAM_CHAT_ID"   >> /opt/apex/apex-predator/.env.testnet
+            # apex-unified .env — dry run, no private key needed
+            cat > /opt/apex/apex-unified/.env << ENVEOF
+            BOT_ID=apex-unified
+            DRY_RUN=true
+            ALLOW_LIVE=false
+            NETWORK=base
+            CHAIN_ID=8453
+            ALCHEMY_WSS_URL=${ALCHEMY_WSS_URL}
+            ENABLE_DEX_SPREAD_SIGNAL=true
+            ENABLE_TRIANGULAR_SIGNAL=true
+            ENABLE_CBETH_SIGNAL=true
+            ENABLE_CEX_CONTEXT=true
+            ENABLE_FLASH_LOAN_PLANNER=false
+            ENABLE_BUILDER_SUBMISSION=false
+            MAX_TRADE_USD=50000
+            MAX_DAILY_LOSS_USD=500
+            MIN_NET_EDGE_BPS=5
+            TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+            TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+            ENVEOF
 
-            # Go bot — all vars need ARB_ prefix
-            printf 'ARB_RPC_URLS=%s\n'       "$ALCHEMY_HTTP_URL"  >  /opt/apex/arbitrage/.env
-            printf 'ARB_PRIVATE_KEY=%s\n'    "$WALLET_PRIVATE_KEY" >> /opt/apex/arbitrage/.env
-            printf 'ARB_DRY_RUN=true\n'                            >> /opt/apex/arbitrage/.env
-            printf 'ARB_SUPABASE_URL=%s\n'   "https://ogyrwseedlcxlfwwjwnd.supabase.co"   >> /opt/apex/arbitrage/.env
-            printf 'ARB_SUPABASE_KEY=%s\n'   "$SUPABASE_ANON_KEY" >> /opt/apex/arbitrage/.env
-            printf 'ARB_LOG_LEVEL=info\n'                          >> /opt/apex/arbitrage/.env
-            printf 'ARB_TELEGRAM_BOT_TOKEN=%s\n' "$TELEGRAM_BOT_TOKEN" >> /opt/apex/arbitrage/.env
-            printf 'ARB_TELEGRAM_CHAT_ID=%s\n'   "$TELEGRAM_CHAT_ID"   >> /opt/apex/arbitrage/.env
+            # Verify safety flags — must be true
+            grep "DRY_RUN=true" /opt/apex/apex-unified/.env
+            grep "ALLOW_LIVE=false" /opt/apex/apex-unified/.env
+            echo "Env write: OK"
 
-            # Verify DRY_RUN — must be present and true in both
-            grep "DRY_RUN" /opt/apex/apex-predator/.env.testnet
-            grep "ARB_DRY_RUN" /opt/apex/arbitrage/.env
-
-      - name: Block H — Start bots in screen sessions
+      - name: Block H — Start apex-unified in screen session
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: 5.161.113.63
@@ -205,20 +188,15 @@ jobs:
           command_timeout: 60s
           script: |
             set -e
-            mkdir -p /var/log/apex
+            mkdir -p /var/log/apex /opt/apex/apex-unified/logs
 
-            # Kill existing sessions if any
-            screen -S apex-ts -X quit 2>/dev/null || true
-            screen -S apex-go -X quit 2>/dev/null || true
+            # Kill existing session if any
+            screen -S apex-unified -X quit 2>/dev/null || true
             sleep 2
 
-            # Start TS bot
-            screen -dmS apex-ts bash -c \
-              'cd /opt/apex/apex-predator && npm start 2>&1 | tee /var/log/apex/ts.log'
-
-            # Start Go bot
-            screen -dmS apex-go bash -c \
-              'cd /opt/apex/arbitrage && ./apex-arbitrage 2>&1 | tee /var/log/apex/go.log'
+            # Start apex-unified dry-run
+            screen -dmS apex-unified bash -c \
+              'cd /opt/apex/apex-unified && node dist/scripts/dry-run.js 2>&1 | tee /var/log/apex/unified.log'
 
             sleep 3
             echo "Running sessions:"
@@ -233,24 +211,16 @@ jobs:
           command_timeout: 60s
           script: |
             sleep 20
-            echo "=== TS BOT LOGS ==="
-            tail -30 /var/log/apex/ts.log 2>/dev/null || echo "No TS log yet"
+            echo "=== APEX UNIFIED LOGS ==="
+            tail -40 /var/log/apex/unified.log 2>/dev/null || echo "No log yet"
             echo ""
-            echo "=== GO BOT LOGS ==="
-            tail -30 /var/log/apex/go.log 2>/dev/null || echo "No Go log yet"
-            echo ""
-            # Fail the workflow if bots crashed immediately
-            if ! screen -ls | grep -q "apex-ts"; then
-              echo "FATAL: TS bot screen session not running"
-              cat /var/log/apex/ts.log
+            # Fail if bot crashed immediately
+            if ! screen -ls | grep -q "apex-unified"; then
+              echo "FATAL: apex-unified screen session not running"
+              cat /var/log/apex/unified.log
               exit 1
             fi
-            if ! screen -ls | grep -q "apex-go"; then
-              echo "FATAL: Go bot screen session not running"
-              cat /var/log/apex/go.log
-              exit 1
-            fi
-            echo "Both bots running"
+            echo "apex-unified running"
 
       - name: Block J — Auto-restart on reboot
         uses: appleboy/ssh-action@v1.2.0
@@ -260,16 +230,17 @@ jobs:
           password: ${{ secrets.HETZNER_ROOT_PASSWORD }}
           command_timeout: 30s
           script: |
-            cat > /opt/restart-bots.sh << 'SCRIPT'
+            cat > /opt/restart-apex-unified.sh << 'SCRIPT'
             #!/bin/bash
             sleep 10
-            screen -dmS apex-ts bash -c 'cd /opt/apex/apex-predator && npm start 2>&1 | tee /var/log/apex/ts.log'
-            screen -dmS apex-go bash -c 'cd /opt/apex/arbitrage && ./apex-arbitrage 2>&1 | tee /var/log/apex/go.log'
+            mkdir -p /var/log/apex /opt/apex/apex-unified/logs
+            screen -dmS apex-unified bash -c \
+              'cd /opt/apex/apex-unified && node dist/scripts/dry-run.js 2>&1 | tee /var/log/apex/unified.log'
             SCRIPT
-            chmod +x /opt/restart-bots.sh
+            chmod +x /opt/restart-apex-unified.sh
 
             # Add to crontab if not already there
-            (crontab -l 2>/dev/null | grep -v restart-bots; echo "@reboot /opt/restart-bots.sh") | crontab -
+            (crontab -l 2>/dev/null | grep -v restart-apex-unified; echo "@reboot /opt/restart-apex-unified.sh") | crontab -
             echo "Crontab:"
             crontab -l
 
@@ -281,7 +252,7 @@ jobs:
       - name: Wait 10 minutes
         run: sleep 600
 
-      - name: Check Supabase for data flow
+      - name: Check logs and JSONL output
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: 5.161.113.63
@@ -290,9 +261,8 @@ jobs:
           command_timeout: 30s
           script: |
             echo "=== Final log check ==="
-            tail -50 /var/log/apex/ts.log
+            tail -60 /var/log/apex/unified.log
             echo ""
-            tail -30 /var/log/apex/go.log
-            echo ""
-            echo "=== Supabase check SQL (run in Supabase SQL editor) ==="
-            echo "SELECT reason_code, COUNT(*) FROM opportunity_rejections WHERE created_at > NOW() - INTERVAL '10 minutes' GROUP BY 1 ORDER BY 2 DESC;"
+            echo "=== JSONL opportunity count ==="
+            find /opt/apex/apex-unified/logs -name "opportunities-*.jsonl" \
+              -exec wc -l {} \; 2>/dev/null || echo "No JSONL files yet (normal if <1 block)"
