@@ -8,7 +8,7 @@ import * as fs                      from 'fs';
 import * as path                    from 'path';
 
 const STRATEGY_IDS: StrategyId[] = [
-  'apex.dex_spread', 'apex.triangular', 'grok.cbeth_fair_value',
+  'apex.dex_spread', 'apex.triangular', 'grok.cbeth_fair_value', 'apex.aerodrome_spread',
 ];
 
 function buildStats(strategyId: StrategyId, opps: Opportunity[]): StrategyStats {

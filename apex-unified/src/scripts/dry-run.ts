@@ -9,6 +9,7 @@ import { getCexFeed }              from '../signals/cexContextSignal';
 import { CbEthFairValueScanner }   from '../scanners/cbETHFairValueScanner';
 import { ApexPairScanner }         from '../scanners/apexPairScanner';
 import { ApexTriangularScanner }   from '../scanners/apexTriangularScanner';
+import { AerodromeScanner }        from '../scanners/aerodromeScanner';
 import { getGasForecast }          from '../execution/gasForecaster';
 import { checkCircuitBreaker }     from '../risk/circuitBreaker';
 import { acquireLock }             from '../risk/networkMutex';
@@ -25,6 +26,7 @@ const stats = {
   dexSpread:     { scans: 0, opps: 0, errors: 0 },
   triangular:    { scans: 0, opps: 0, errors: 0 },
   cbeth:         { scans: 0, opps: 0, errors: 0 },
+  aerodrome:     { scans: 0, opps: 0, errors: 0 },
 };
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -38,9 +40,10 @@ async function main(): Promise<void> {
   console.log(`  CHAIN:       Base (${ctx.chainId})`);
   console.log(`  MODE:        DRY RUN — zero transactions`);
   console.log(`  Strategies:  ${[
-    CONFIG.ENABLE_DEX_SPREAD_SIGNAL  ? 'apex.dex_spread'        : '',
-    CONFIG.ENABLE_TRIANGULAR_SIGNAL  ? 'apex.triangular'        : '',
-    CONFIG.ENABLE_CBETH_SIGNAL       ? 'grok.cbeth_fair_value'  : '',
+    CONFIG.ENABLE_DEX_SPREAD_SIGNAL  ? 'apex.dex_spread'         : '',
+    CONFIG.ENABLE_TRIANGULAR_SIGNAL  ? 'apex.triangular'         : '',
+    CONFIG.ENABLE_CBETH_SIGNAL       ? 'grok.cbeth_fair_value'   : '',
+    CONFIG.ENABLE_AERODROME_SIGNAL   ? 'apex.aerodrome_spread'   : '',
   ].filter(Boolean).join(', ')}`);
   console.log('');
 
@@ -62,9 +65,10 @@ async function main(): Promise<void> {
   const provider = await createWsProvider(CONFIG.ALCHEMY_WSS_URL);
   logger.info('MAIN', 'Connected');
 
-  const cbethScanner  = CONFIG.ENABLE_CBETH_SIGNAL    ? new CbEthFairValueScanner(provider)   : null;
-  const pairScanner   = CONFIG.ENABLE_DEX_SPREAD_SIGNAL ? new ApexPairScanner(provider)        : null;
-  const triScanner    = CONFIG.ENABLE_TRIANGULAR_SIGNAL ? new ApexTriangularScanner(provider)  : null;
+  const cbethScanner  = CONFIG.ENABLE_CBETH_SIGNAL      ? new CbEthFairValueScanner(provider)  : null;
+  const pairScanner   = CONFIG.ENABLE_DEX_SPREAD_SIGNAL  ? new ApexPairScanner(provider)        : null;
+  const triScanner    = CONFIG.ENABLE_TRIANGULAR_SIGNAL  ? new ApexTriangularScanner(provider)  : null;
+  const aeroScanner   = CONFIG.ENABLE_AERODROME_SIGNAL   ? new AerodromeScanner(provider)       : null;
 
   const QUOTER_ABI = [
     'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
@@ -94,17 +98,19 @@ async function main(): Promise<void> {
     stats.blocks++;
 
     try {
-      const [ethPrice] = await Promise.all([getEthPrice()]);
+      const ethPrice = await getEthPrice();
 
-      const [cbethResult, pairResult, triResult] = await Promise.all([
+      const [cbethResult, pairResult, triResult, aeroResult] = await Promise.all([
         cbethScanner?.scan(provider, blockNum)    ?? Promise.resolve(null),
         pairScanner?.scan(blockNum, ethPrice)     ?? Promise.resolve(null),
         triScanner?.scan(blockNum)                ?? Promise.resolve(null),
+        aeroScanner?.scan(blockNum)               ?? Promise.resolve(null),
       ]);
 
-      if (cbethResult)  { stats.cbeth.scans   += cbethResult.scanned;  stats.cbeth.opps   += cbethResult.opportunities.length;  stats.cbeth.errors   += cbethResult.errors; }
-      if (pairResult)   { stats.dexSpread.scans += pairResult.scanned; stats.dexSpread.opps += pairResult.opportunities.length; stats.dexSpread.errors += pairResult.errors; }
-      if (triResult)    { stats.triangular.scans += triResult.scanned; stats.triangular.opps += triResult.opportunities.length; stats.triangular.errors += triResult.errors; }
+      if (cbethResult)  { stats.cbeth.scans      += cbethResult.scanned;  stats.cbeth.opps      += cbethResult.opportunities.length;  stats.cbeth.errors      += cbethResult.errors; }
+      if (pairResult)   { stats.dexSpread.scans  += pairResult.scanned;   stats.dexSpread.opps  += pairResult.opportunities.length;   stats.dexSpread.errors  += pairResult.errors; }
+      if (triResult)    { stats.triangular.scans += triResult.scanned;    stats.triangular.opps += triResult.opportunities.length;    stats.triangular.errors += triResult.errors; }
+      if (aeroResult)   { stats.aerodrome.scans  += aeroResult.scanned;   stats.aerodrome.opps  += aeroResult.opportunities.length;   stats.aerodrome.errors  += aeroResult.errors; }
 
       if (stats.blocks % 50 === 0) {
         const up = uptime(START);
@@ -112,7 +118,8 @@ async function main(): Promise<void> {
           `${up} | block=${blockNum} | ` +
           `cbeth=${stats.cbeth.opps}/${stats.cbeth.scans} ` +
           `dex=${stats.dexSpread.opps}/${stats.dexSpread.scans} ` +
-          `tri=${stats.triangular.opps}/${stats.triangular.scans}`
+          `tri=${stats.triangular.opps}/${stats.triangular.scans} ` +
+          `aero=${stats.aerodrome.opps}/${stats.aerodrome.scans}`
         );
       }
     } catch (err: any) {
@@ -138,8 +145,9 @@ async function main(): Promise<void> {
       cbeth_opps:    stats.cbeth.opps,
       dex_opps:      stats.dexSpread.opps,
       tri_opps:      stats.triangular.opps,
-      total_opps:    stats.cbeth.opps + stats.dexSpread.opps + stats.triangular.opps,
-      errors:        stats.cbeth.errors + stats.dexSpread.errors + stats.triangular.errors,
+      aero_opps:     stats.aerodrome.opps,
+      total_opps:    stats.cbeth.opps + stats.dexSpread.opps + stats.triangular.opps + stats.aerodrome.opps,
+      errors:        stats.cbeth.errors + stats.dexSpread.errors + stats.triangular.errors + stats.aerodrome.errors,
     };
 
     logSummary(summary);
@@ -147,7 +155,7 @@ async function main(): Promise<void> {
     logger.info('HOURLY',
       `${up} | blocks=${stats.blocks} | ` +
       `total_opps=${summary.total_opps} ` +
-      `(cbeth=${stats.cbeth.opps} dex=${stats.dexSpread.opps} tri=${stats.triangular.opps}) ` +
+      `(cbeth=${stats.cbeth.opps} dex=${stats.dexSpread.opps} tri=${stats.triangular.opps} aero=${stats.aerodrome.opps}) ` +
       `errors=${summary.errors}`
     );
 
@@ -156,7 +164,8 @@ async function main(): Promise<void> {
       `Blocks: ${stats.blocks}\n` +
       `cbETH opps: ${stats.cbeth.opps}\n` +
       `DEX spread opps: ${stats.dexSpread.opps}\n` +
-      `Triangular opps: ${stats.triangular.opps}`
+      `Triangular opps: ${stats.triangular.opps}\n` +
+      `Aerodrome opps: ${stats.aerodrome.opps}`
     );
   }, 60 * 60 * 1_000);
 

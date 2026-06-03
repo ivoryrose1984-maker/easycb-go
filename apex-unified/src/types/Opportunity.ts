@@ -2,6 +2,7 @@ export type StrategyId =
   | 'apex.dex_spread'
   | 'apex.triangular'
   | 'grok.cbeth_fair_value'
+  | 'apex.aerodrome_spread'
   | 'atlas.replay'
   | 'atlas.backtest';
 

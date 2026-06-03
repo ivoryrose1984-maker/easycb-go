@@ -8,25 +8,34 @@ const QUOTER_ABI = [
   'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
 ];
 
-const FEE_TIERS = [100, 500, 3000, 10000];
+const UNI_FEES  = [100, 500, 3000, 10000];
+const CAKE_FEES = [100, 500, 2500, 10000];  // PancakeSwap V3 uses 2500 not 3000
+
+type DexId = 'uni-v3' | 'cake-v3';
+
+interface QuoteCandidate { dex: DexId; fee: number; out: bigint; }
 
 export interface DexSpreadResult {
-  pair:         string;
-  tokenIn:      string;
-  tokenOut:     string;
-  buyFee:       number;
-  sellFee:      number;
-  spreadBps:    number;
-  loanAmount:   bigint;
-  grossProfit:  bigint;
-  opportunity:  Opportunity | null;
+  pair:        string;
+  tokenIn:     string;
+  tokenOut:    string;
+  buyDex:      DexId;
+  buyFee:      number;
+  sellDex:     DexId;
+  sellFee:     number;
+  spreadBps:   number;
+  loanAmount:  bigint;
+  grossProfit: bigint;
+  opportunity: Opportunity | null;
 }
 
 export class DexSpreadSignal {
-  private quoter: ethers.Contract;
+  private uniQuoter:  ethers.Contract;
+  private cakeQuoter: ethers.Contract;
 
   constructor(provider: ethers.Provider) {
-    this.quoter = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER, QUOTER_ABI, provider);
+    this.uniQuoter  = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER,  QUOTER_ABI, provider);
+    this.cakeQuoter = new ethers.Contract(CONFIG.CONTRACTS.CAKE_QUOTER, QUOTER_ABI, provider);
   }
 
   async scan(
@@ -36,38 +45,64 @@ export class DexSpreadSignal {
     ethPriceUsd: bigint
   ): Promise<DexSpreadResult | null> {
     try {
-      const buyQuotes = await Promise.all(FEE_TIERS.map(fee =>
-        this.quoter.quoteExactInputSingle.staticCall({
-          tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
-          amountIn: loanAmount, fee, sqrtPriceLimitX96: 0,
-        }).catch(() => null)
-      ));
+      // ── Phase 1: buy quotes tokenIn → tokenOut (both DEXes, all fee tiers) ──
+      const [uniBuyRaw, cakeBuyRaw] = await Promise.all([
+        Promise.all(UNI_FEES.map(fee =>
+          this.uniQuoter.quoteExactInputSingle.staticCall({
+            tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
+            amountIn: loanAmount, fee, sqrtPriceLimitX96: 0,
+          }).then((r: any) => r[0] as bigint).catch(() => 0n)
+        )),
+        Promise.all(CAKE_FEES.map(fee =>
+          this.cakeQuoter.quoteExactInputSingle.staticCall({
+            tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
+            amountIn: loanAmount, fee, sqrtPriceLimitX96: 0,
+          }).then((r: any) => r[0] as bigint).catch(() => 0n)
+        )),
+      ]);
 
-      let buyFee = FEE_TIERS[0], bestBuyOut = 0n;
-      for (let i = 0; i < FEE_TIERS.length; i++) {
-        const out: bigint = buyQuotes[i]?.[0] ?? 0n;
-        if (out > bestBuyOut) { bestBuyOut = out; buyFee = FEE_TIERS[i]; }
-      }
-      if (bestBuyOut === 0n) return null;
+      const buyQuotes: QuoteCandidate[] = [
+        ...UNI_FEES.map((fee, i)  => ({ dex: 'uni-v3'  as DexId, fee, out: uniBuyRaw[i] })),
+        ...CAKE_FEES.map((fee, i) => ({ dex: 'cake-v3' as DexId, fee, out: cakeBuyRaw[i] })),
+      ].filter(q => q.out > 0n);
 
-      const sellFeeTiers = FEE_TIERS.filter(f => f !== buyFee);
-      const sellQuotes = await Promise.all(sellFeeTiers.map(fee =>
-        this.quoter.quoteExactInputSingle.staticCall({
-          tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
-          amountIn: bestBuyOut, fee, sqrtPriceLimitX96: 0,
-        }).catch(() => null)
-      ));
+      if (buyQuotes.length === 0) return null;
+      const bestBuy = buyQuotes.reduce((a, b) => b.out > a.out ? b : a);
 
-      let sellFee = sellFeeTiers[0], bestSellOut = 0n;
-      for (let i = 0; i < sellFeeTiers.length; i++) {
-        const out: bigint = sellQuotes[i]?.[0] ?? 0n;
-        if (out > bestSellOut) { bestSellOut = out; sellFee = sellFeeTiers[i]; }
-      }
-      if (bestSellOut === 0n) return null;
+      // ── Phase 2: sell quotes tokenOut → tokenIn (skip same pool as buy) ──
+      const [uniSellRaw, cakeSellRaw] = await Promise.all([
+        Promise.all(UNI_FEES.map(fee => {
+          if (bestBuy.dex === 'uni-v3' && fee === bestBuy.fee) return Promise.resolve(0n);
+          return this.uniQuoter.quoteExactInputSingle.staticCall({
+            tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
+            amountIn: bestBuy.out, fee, sqrtPriceLimitX96: 0,
+          }).then((r: any) => r[0] as bigint).catch(() => 0n);
+        })),
+        Promise.all(CAKE_FEES.map(fee => {
+          if (bestBuy.dex === 'cake-v3' && fee === bestBuy.fee) return Promise.resolve(0n);
+          return this.cakeQuoter.quoteExactInputSingle.staticCall({
+            tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
+            amountIn: bestBuy.out, fee, sqrtPriceLimitX96: 0,
+          }).then((r: any) => r[0] as bigint).catch(() => 0n);
+        })),
+      ]);
+
+      const sellQuotes: QuoteCandidate[] = [
+        ...UNI_FEES.map((fee, i)  => ({ dex: 'uni-v3'  as DexId, fee, out: uniSellRaw[i] })),
+        ...CAKE_FEES.map((fee, i) => ({ dex: 'cake-v3' as DexId, fee, out: cakeSellRaw[i] })),
+      ].filter(q => q.out > 0n);
+
+      if (sellQuotes.length === 0) return null;
+      const bestSell = sellQuotes.reduce((a, b) => b.out > a.out ? b : a);
 
       const spreadBps = loanAmount > 0n
-        ? Number(((bestSellOut - loanAmount) * 10_000n) / loanAmount)
+        ? Number(((bestSell.out - loanAmount) * 10_000n) / loanAmount)
         : 0;
+
+      const isCrossDex  = bestBuy.dex !== bestSell.dex;
+      const dexLabel    = isCrossDex
+        ? `${bestBuy.dex}→${bestSell.dex}`
+        : bestBuy.dex;
 
       const isOpportunity = spreadBps >= CONFIG.MIN_PROFIT_BPS;
 
@@ -75,14 +110,18 @@ export class DexSpreadSignal {
         chainId:      CONFIG.CHAIN_ID,
         blockNumber,
         strategyId:   'apex.dex_spread',
-        feeTier:      buyFee,
+        feeTier:      bestBuy.fee,
         tokenIn:      pair.tokenIn,
         tokenOut:     pair.tokenOut,
         quotedInput:  loanAmount.toString(),
-        quotedOutput: bestSellOut.toString(),
+        quotedOutput: bestSell.out.toString(),
       });
 
-      logger.debug('DEX', `${pair.name} spread=${spreadBps}bps buy=${buyFee} sell=${sellFee}`);
+      logger.debug('DEX',
+        `${pair.name} spread=${spreadBps}bps buy=${bestBuy.dex}@${bestBuy.fee} sell=${bestSell.dex}@${bestSell.fee}`
+      );
+
+      const grossUsd = Math.max(0, usdcToUsd(bestSell.out - loanAmount));
 
       const opp: Opportunity = {
         timestamp:        new Date().toISOString(),
@@ -94,19 +133,17 @@ export class DexSpreadSignal {
         opportunityHash:  hash,
         tokenIn:          pair.tokenIn,
         tokenOut:         pair.tokenOut,
-        route:            `${pair.name} (buy=${buyFee} sell=${sellFee})`,
-        dex:              'uniswap-v3',
-        feeTier:          buyFee,
+        route:            `${pair.name} (buy=${bestBuy.dex}@${bestBuy.fee} sell=${bestSell.dex}@${bestSell.fee})`,
+        dex:              dexLabel,
+        feeTier:          bestBuy.fee,
         quotedInput:      loanAmount.toString(),
-        quotedOutput:     bestSellOut.toString(),
+        quotedOutput:     bestSell.out.toString(),
         fairValuePrice:   null,
-        dexPrice:         Number(bestSellOut) / Number(loanAmount),
+        dexPrice:         Number(bestSell.out) / Number(loanAmount),
         cexPrice:         null,
         spreadBps,
-        grossProfitUsd:   usdcToUsd(bestSellOut - loanAmount),
-        netProfitUsd:     parseFloat(Math.max(0,
-          usdcToUsd(bestSellOut - loanAmount) - 0.90 - usdcToUsd(bestSellOut - loanAmount) * 0.0005
-        ).toFixed(4)),
+        grossProfitUsd:   grossUsd,
+        netProfitUsd:     parseFloat(Math.max(0, grossUsd - 0.90 - grossUsd * 0.0005).toFixed(4)),
         gasEstimate:      '0.0003',
         slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(loanAmount) / 1e12) * 10)),
         flashLoanFeeEst:  0,
@@ -122,11 +159,13 @@ export class DexSpreadSignal {
         pair:        pair.name,
         tokenIn:     pair.tokenIn,
         tokenOut:    pair.tokenOut,
-        buyFee,
-        sellFee,
+        buyDex:      bestBuy.dex,
+        buyFee:      bestBuy.fee,
+        sellDex:     bestSell.dex,
+        sellFee:     bestSell.fee,
         spreadBps,
         loanAmount,
-        grossProfit: bestSellOut > loanAmount ? bestSellOut - loanAmount : 0n,
+        grossProfit: bestSell.out > loanAmount ? bestSell.out - loanAmount : 0n,
         opportunity: isOpportunity ? opp : null,
       };
     } catch (err: any) {

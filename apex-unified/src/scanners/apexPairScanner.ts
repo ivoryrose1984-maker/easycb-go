@@ -1,4 +1,4 @@
-import { ethers }       from 'ethers';
+import { ethers }          from 'ethers';
 import { DexSpreadSignal } from '../signals/dexSpreadSignal';
 import { executeDryRun }   from '../execution/dryRunExecutor';
 import { logSignal, logRejection } from '../core/jsonlLogger';
@@ -18,6 +18,8 @@ const PAIRS = [
   { tokenIn: CONFIG.TOKENS.WETH,  tokenOut: CONFIG.TOKENS.cbETH, name: 'WETH/cbETH' },
   { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.cbBTC, name: 'USDC/cbBTC' },
   { tokenIn: CONFIG.TOKENS.WETH,  tokenOut: CONFIG.TOKENS.cbBTC, name: 'WETH/cbBTC' },
+  { tokenIn: CONFIG.TOKENS.USDbC, tokenOut: CONFIG.TOKENS.WETH,  name: 'USDbC/WETH' },
+  { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.USDbC, name: 'USDC/USDbC' },
 ];
 
 export class ApexPairScanner {
@@ -35,7 +37,7 @@ export class ApexPairScanner {
       return { strategyId, scanned: 0, opportunities: [], errors: 0, durationMs: 0 };
     }
 
-    // USDC/USDT/DAI pairs use 6-decimal probe; WETH tokenIn pairs use 18-decimal probe
+    // USDC/USDT/DAI/USDbC pairs use 6-decimal probe; WETH tokenIn pairs use 18-decimal probe
     const WETH_18_PROBE = ethers.parseEther('3');
     const results = await Promise.allSettled(
       PAIRS.map(pair => {
@@ -56,7 +58,9 @@ export class ApexPairScanner {
         blockNumber,
         pair:      res.pair,
         spreadBps: res.spreadBps,
+        buyDex:    res.buyDex,
         buyFee:    res.buyFee,
+        sellDex:   res.sellDex,
         sellFee:   res.sellFee,
         hasOpp:    !!res.opportunity,
       });
@@ -74,7 +78,7 @@ export class ApexPairScanner {
 
     return {
       strategyId,
-      scanned:   PAIRS.length,
+      scanned:    PAIRS.length,
       opportunities,
       errors,
       durationMs: Date.now() - t0,
