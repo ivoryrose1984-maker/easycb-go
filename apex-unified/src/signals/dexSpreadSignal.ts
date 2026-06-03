@@ -104,7 +104,9 @@ export class DexSpreadSignal {
         cexPrice:         null,
         spreadBps,
         grossProfitUsd:   usdcToUsd(bestSellOut - loanAmount),
-        netProfitUsd:     0,
+        netProfitUsd:     parseFloat(Math.max(0,
+          usdcToUsd(bestSellOut - loanAmount) - 0.90 - usdcToUsd(bestSellOut - loanAmount) * 0.0005
+        ).toFixed(4)),
         gasEstimate:      '0.0003',
         slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(loanAmount) / 1e12) * 10)),
         flashLoanFeeEst:  0,

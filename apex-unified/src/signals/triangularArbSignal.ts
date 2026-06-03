@@ -157,7 +157,9 @@ export class TriangularArbSignal {
         cexPrice:         null,
         spreadBps,
         grossProfitUsd:   usdcToUsd(grossProfit),
-        netProfitUsd:     0,
+        netProfitUsd:     parseFloat(Math.max(0,
+          usdcToUsd(grossProfit) - 0.90 - usdcToUsd(grossProfit) * 0.0015
+        ).toFixed(4)),
         gasEstimate:      '0.0003',
         slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(amountIn) / 1e12) * 10)),
         flashLoanFeeEst:  0,

@@ -1,5 +1,4 @@
 import { ethers }    from 'ethers';
-import { createHash } from 'crypto';
 import CONFIG         from '../core/config';
 import { getCexFeed } from './cexContextSignal';
 import { getCompetitionWindow, adjustedThreshold } from '../core/clock';
@@ -97,7 +96,13 @@ export class CbEthFairValueSignal {
     const isOpportunity = netEdgeBps >= threshold;
     const rpcLatencyMs  = Date.now() - t0;
 
-    logger.debug('cbETH', `block=${blockNumber} gross=${grossEdgeBps.toFixed(2)}bps net=${netEdgeBps.toFixed(2)}bps thresh=${threshold.toFixed(2)}bps latency=${rpcLatencyMs}ms`);
+    const ethPriceUsd    = cexEthMid ?? 3_000;
+    const grossProfitEth = (grossEdgeBps / 10_000) * probeSizeEth;
+    const grossProfitUsd = parseFloat((grossProfitEth * ethPriceUsd).toFixed(4));
+    const gasUsd         = 0.0003 * ethPriceUsd;
+    const netProfitUsd   = parseFloat(Math.max(0, grossProfitUsd - gasUsd - grossProfitUsd * 0.0005).toFixed(4));
+
+    logger.debug('cbETH', `block=${blockNumber} gross=${grossEdgeBps.toFixed(2)}bps net=${netEdgeBps.toFixed(2)}bps grossUsd=$${grossProfitUsd.toFixed(2)} thresh=${threshold.toFixed(2)}bps latency=${rpcLatencyMs}ms`);
 
     const opp: Opportunity = {
       timestamp:        new Date().toISOString(),
@@ -118,8 +123,8 @@ export class CbEthFairValueSignal {
       dexPrice:         dexWethPerCbEth,
       cexPrice:         cexEthMid,
       spreadBps:        parseFloat(grossEdgeBps.toFixed(4)),
-      grossProfitUsd:   0,
-      netProfitUsd:     0,
+      grossProfitUsd,
+      netProfitUsd,
       gasEstimate:      gasEth.toFixed(6),
       slippageEstimate: 5,
       flashLoanFeeEst:  0,

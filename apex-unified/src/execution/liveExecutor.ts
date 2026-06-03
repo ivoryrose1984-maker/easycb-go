@@ -1,6 +1,7 @@
 import { ethers }          from 'ethers';
 import { ExecutionPlan }   from '../types/ExecutionPlan';
 import { requireLiveAllowed } from '../core/safety';
+import CONFIG              from '../core/config';
 import { logger }          from '../core/logger';
 
 const APEX_ABI = [
@@ -22,7 +23,7 @@ export async function executeLive(
   requireLiveAllowed();
 
   const contract = new ethers.Contract(
-    plan.opportunity.tokenIn,
+    CONFIG.CONTRACTS.APEX_FLASH_LOAN,
     APEX_ABI,
     wallet
   );
