@@ -14,11 +14,15 @@ function checkReset(): void {
   }
 }
 
-export function checkTradeAllowed(estimatedTradeUsd: number): { allowed: boolean; reason: string } {
+export function checkTradeAllowed(estimatedTradeUsd: number, estimatedLossUsd = 0): { allowed: boolean; reason: string } {
   checkReset();
 
   if (estimatedTradeUsd > CONFIG.MAX_TRADE_USD) {
     return { allowed: false, reason: `Trade $${estimatedTradeUsd} exceeds MAX_TRADE_USD $${CONFIG.MAX_TRADE_USD}` };
+  }
+
+  if (estimatedLossUsd > CONFIG.MAX_PER_TRADE_LOSS_USD) {
+    return { allowed: false, reason: `Estimated loss $${estimatedLossUsd.toFixed(2)} exceeds MAX_PER_TRADE_LOSS_USD $${CONFIG.MAX_PER_TRADE_LOSS_USD}` };
   }
 
   if (dailyLossUsd >= CONFIG.MAX_DAILY_LOSS_USD) {

@@ -13,6 +13,7 @@ export function optimizeThreshold(opps: Opportunity[], range = [1, 2, 5, 10, 15,
     return { minBps, netUsd: r.totalNetUsd, winRate: r.winRate };
   });
 
+  if (trials.length === 0) return { bestMinBps: 0, bestNetUsd: 0, trialResults: [] };
   const best = trials.reduce((b, t) => t.netUsd > b.netUsd ? t : b, trials[0]);
 
   return {

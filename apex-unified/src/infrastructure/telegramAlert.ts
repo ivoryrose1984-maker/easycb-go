@@ -31,14 +31,21 @@ export function sendAlert(text: string): void {
      .catch(err => logger.error('TG', `Send failed: ${err}`));
 }
 
+function sendPriority(text: string): void {
+  if (!bot || !chatId) return;
+  // Safety-critical alerts bypass the cooldown
+  bot.sendMessage(chatId, `🚨 *ApexUnified*\n\n${text}`, { parse_mode: 'Markdown' })
+     .catch(err => logger.error('TG', `Priority send failed: ${err}`));
+}
+
 export function alertOpportunity(strategyId: string, bps: number, blockNum: number): void {
   sendAlert(`Opportunity\nStrategy: ${strategyId}\nSpread: ${bps}bps\nBlock: ${blockNum}`);
 }
 
 export function alertCircuitBreaker(msg: string): void {
-  sendAlert(`CIRCUIT BREAKER\n${msg}`);
+  sendPriority(`CIRCUIT BREAKER\n${msg}`);
 }
 
 export function alertError(msg: string): void {
-  sendAlert(`ERROR\n${msg}`);
+  sendPriority(`ERROR\n${msg}`);
 }

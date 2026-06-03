@@ -33,8 +33,8 @@ function buildStats(strategyId: StrategyId, opps: Opportunity[]): StrategyStats 
 
   return {
     strategyId,
-    totalScans:            mine.length,
-    totalOpportunities:    mine.length,
+    totalScans:            mine.length,          // all logged (accepted + rejected)
+    totalOpportunities:    accepted.length,
     acceptedOpportunities: accepted.length,
     rejectedOpportunities: rejected.length,
     rejectionBreakdown:    rejBreakdown,

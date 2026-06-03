@@ -88,7 +88,8 @@ let _feed: BinanceFeed | null = null;
 
 export function getCexFeed(): BinanceFeed {
   if (!_feed) {
-    _feed = new BinanceFeed(['ethusdc', 'btcusdc']);
+    // Binance streams require USDT symbols; message handler normalises to USDC keys
+    _feed = new BinanceFeed(['ethusdt', 'btcusdt']);
     _feed.start();
   }
   return _feed;

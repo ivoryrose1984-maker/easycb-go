@@ -121,8 +121,11 @@ async function main(): Promise<void> {
     }
   });
 
-  // ── Circuit breaker check every 30s ──────────────────────────────────────────
-  setInterval(() => checkCircuitBreaker(provider, CONFIG.BOT_ID), 30_000);
+  // ── Circuit breaker check every 30s (live only — dry run has no wallet balance) ─
+  const monitorAddress = process.env.WALLET_ADDRESS ?? process.env.MONITOR_ADDRESS ?? '';
+  if (monitorAddress) {
+    setInterval(() => checkCircuitBreaker(provider, monitorAddress), 30_000);
+  }
 
   // ── Hourly summary ────────────────────────────────────────────────────────────
   setInterval(() => {

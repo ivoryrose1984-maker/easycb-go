@@ -35,9 +35,13 @@ export class ApexPairScanner {
       return { strategyId, scanned: 0, opportunities: [], errors: 0, durationMs: 0 };
     }
 
-    const probe = CONFIG.MIN_LOAN_USDC;
+    // USDC/USDT/DAI pairs use 6-decimal probe; WETH tokenIn pairs use 18-decimal probe
+    const WETH_18_PROBE = ethers.parseEther('3');
     const results = await Promise.allSettled(
-      PAIRS.map(pair => this.signal.scan(pair, probe, blockNumber, ethPriceUsd))
+      PAIRS.map(pair => {
+        const probe = pair.tokenIn === CONFIG.TOKENS.WETH ? WETH_18_PROBE : CONFIG.MIN_LOAN_USDC;
+        return this.signal.scan(pair, probe, blockNumber, ethPriceUsd);
+      })
     );
 
     const opportunities = [];
