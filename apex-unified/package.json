@@ -4,11 +4,13 @@
   "description": "Unified DeFi arbitrage system: Atlas thinks, Grok sees, Apex executes",
   "main": "dist/scripts/dry-run.js",
   "scripts": {
-    "build":         "tsc",
-    "dry-run":       "npm run build && node dist/scripts/dry-run.js",
-    "report":        "npm run build && node dist/scripts/generate-report.js",
-    "replay":        "npm run build && node dist/scripts/replay.js",
-    "test":          "jest --runInBand"
+    "build":          "tsc",
+    "dry-run":        "npm run build && node dist/scripts/dry-run.js",
+    "report":         "npm run build && node dist/scripts/generate-report.js",
+    "replay":         "npm run build && node dist/scripts/replay.js",
+    "compile":        "mkdir -p compiled && npx solc@0.8.19 --bin --abi --optimize --optimize-runs 200 --output-dir compiled src/contracts/ApexFlashLoan.sol",
+    "deploy":         "npm run build && npm run compile && node dist/scripts/deploy-contract.js",
+    "test":           "jest --runInBand"
   },
   "dependencies": {
     "@supabase/supabase-js":              "^2.39.0",
