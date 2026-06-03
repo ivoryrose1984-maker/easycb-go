@@ -66,11 +66,13 @@ export const CONFIG = {
     APEX_FLASH_LOAN: process.env.APEX_FLASH_LOAN_BASE ?? '0x0000000000000000000000000000000000000000',
   },
 
+  // Base-compatible submission targets (ENABLE_BUILDER_SUBMISSION=false by default)
+  // Base uses a centralized Coinbase sequencer — direct RPC is correct for most cases
   BUILDERS: [
-    { name: 'flashbots', url: 'https://rpc.flashbots.net',    enabled: true },
-    { name: 'titan',     url: 'https://rpc.titanbuilder.xyz', enabled: true },
-    { name: 'beaver',    url: 'https://rpc.beaverbuild.org',  enabled: true },
-    { name: 'rsync',     url: 'https://rsync-builder.xyz',    enabled: true },
+    { name: 'base-sequencer', url: 'https://mainnet.base.org',        enabled: true  },
+    { name: 'mev-share',      url: 'https://mev-share.flashbots.net', enabled: false },
+    { name: 'bloxroute',      url: 'https://virginia.eth.blxrbdn.com',enabled: false },
+    { name: 'titan',          url: 'https://rpc.titanbuilder.xyz',    enabled: false },
   ],
 
   // Sizing
