@@ -4,7 +4,7 @@ export interface ExecutionPlan {
   opportunity:       Opportunity;
   loanToken:         string;
   loanAmount:        string;        // bigint as string
-  flashLoanSource:   string;
+  routerAddress:     string;
   route:             string;        // encoded ABI path
   minAmountOut:      string;        // bigint as string
   gasLimit:          string;        // bigint as string

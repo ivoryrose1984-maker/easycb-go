@@ -1,6 +1,9 @@
 import CONFIG from '../core/config';
 import { GasForecast } from './gasForecaster';
 import { gweiToWei } from '../core/config';
+import { Opportunity } from '../types/Opportunity';
+import { ExecutionPlan } from '../types/ExecutionPlan';
+import { encode2HopPath } from './routePlanner';
 
 export interface ProfitResult {
   netProfit:           bigint;
@@ -44,6 +47,43 @@ export function calculateNetProfit(
   const slippageEstimateBps = Math.min(250, Math.round(Math.sqrt(Number(amountIn) / 1e12) * 10));
 
   return { netProfit, score, shouldExecute, gasCostWei, maxFeePerGas, priorityFeePerGas, slippageEstimateBps };
+}
+
+export function buildExecutionPlan(
+  opp:           Opportunity,
+  routerAddress: string,
+  feeBuy:        number,
+  feeSell:       number,
+  sellQuote:     bigint,
+  gasForecast:   GasForecast,
+  ethPriceUsd:   bigint,
+): ExecutionPlan {
+  const loanAmount   = BigInt(opp.quotedInput);
+  const minAmountOut = sellQuote * 995n / 1000n;  // 0.5% slippage protection
+
+  const route = encode2HopPath(
+    opp.tokenIn,  feeBuy,
+    opp.tokenOut, feeSell,
+    opp.tokenIn,  // round-trip: repay same token as loan
+  );
+
+  const profit = calculateNetProfit(loanAmount, loanAmount, sellQuote, gasForecast, ethPriceUsd);
+  const maxFeePerGas = gasForecast.predictedBaseFee * CONFIG.BASE_FEE_MULTIPLIER + profit.priorityFeePerGas;
+
+  return {
+    opportunity:          opp,
+    loanToken:            opp.tokenIn,
+    loanAmount:           loanAmount.toString(),
+    routerAddress,
+    route,
+    minAmountOut:         minAmountOut.toString(),
+    gasLimit:             CONFIG.TX_GAS_LIMIT.toString(),
+    maxFeePerGas:         maxFeePerGas.toString(),
+    maxPriorityFeePerGas: profit.priorityFeePerGas.toString(),
+    targetBlock:          opp.blockNumber + 1,
+    builderUrls:          CONFIG.BUILDERS.filter(b => b.enabled).map(b => b.url),
+    estimatedProfitUsd:   profit.netProfit > 0n ? Number(profit.netProfit) / 1e6 : 0,
+  };
 }
 
 export async function findOptimalLoanSize(

@@ -2,6 +2,12 @@ import { ethers }    from 'ethers';
 import CONFIG, { weiToEth } from '../core/config';
 import { logger }    from '../core/logger';
 import { sendAlert } from '../infrastructure/telegramAlert';
+import { killStrategy } from './strategyKillSwitch';
+import { StrategyId }   from '../types/Opportunity';
+
+const ALL_STRATEGIES: StrategyId[] = [
+  'apex.dex_spread', 'apex.triangular', 'grok.cbeth_fair_value', 'apex.aerodrome_spread',
+];
 
 let triggered      = false;
 let initialBalance: bigint | null = null;
@@ -27,7 +33,9 @@ export async function checkCircuitBreaker(provider: ethers.Provider, address: st
       triggered = true;
       const msg = `Circuit breaker: ${drawdownPct.toFixed(1)}% drawdown — halting all execution`;
       logger.error('CIRCUIT', msg);
-      sendAlert(msg);
+      for (const id of ALL_STRATEGIES) killStrategy(id, 'circuit breaker triggered');
+      await sendAlert(msg);
+      process.exit(1);
     }
   } catch (err: any) {
     logger.error('CIRCUIT', `Check failed: ${err.message}`);

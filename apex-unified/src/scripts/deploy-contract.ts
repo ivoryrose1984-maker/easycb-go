@@ -19,8 +19,13 @@ const ABI = [
   'function taxBps() view returns (uint256)',
   'function paused() view returns (bool)',
   'function executeArbitrage(address flashToken, uint256 flashAmount, address uniV3Router, bytes calldata path, uint256 minAmountOut) external',
+  'function setRouter(address router, bool approved) external',
   'event ArbitrageExecuted(address indexed token, uint256 amountIn, uint256 profit, uint256 taxAmount)',
 ];
+
+// Approved routers on Base mainnet
+const UNI_V3_ROUTER  = '0x2626664c2603336E57B271c5C0b26F421741e481';
+const CAKE_V3_ROUTER = '0x1b81D678ffb9C0263b24A97847620C99d213eB14';
 
 async function main(): Promise<void> {
   // ── Safety checks ──────────────────────────────────────────────────────────
@@ -87,11 +92,19 @@ async function main(): Promise<void> {
   console.log(`\n  Contract deployed: ${address}`);
   console.log(`  Tx hash: ${contract.deploymentTransaction()?.hash}`);
 
+  // ── Whitelist routers ─────────────────────────────────────────────────────
+  const deployed = new ethers.Contract(address, ABI, wallet);
+  console.log('\nWhitelisting Uniswap V3 Router...');
+  await (await deployed.setRouter(UNI_V3_ROUTER,  true)).wait();
+  console.log(`  Uni V3 Router whitelisted:        ${UNI_V3_ROUTER}`);
+  console.log('Whitelisting PancakeSwap V3 Router...');
+  await (await deployed.setRouter(CAKE_V3_ROUTER, true)).wait();
+  console.log(`  PancakeSwap V3 Router whitelisted: ${CAKE_V3_ROUTER}`);
+
   // ── Configure split (optional) ─────────────────────────────────────────────
   if (taxWallet && taxBps > 0) {
     console.log(`\nConfiguring profit split: ${taxBps} bps → ${taxWallet}`);
-    const c = new ethers.Contract(address, ABI, wallet);
-    const tx = await c.setSplit(taxWallet, taxBps);
+    const tx = await deployed.setSplit(taxWallet, taxBps);
     await tx.wait();
     console.log('  Split configured.');
   }

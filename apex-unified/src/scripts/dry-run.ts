@@ -11,7 +11,7 @@ import { ApexPairScanner }         from '../scanners/apexPairScanner';
 import { ApexTriangularScanner }   from '../scanners/apexTriangularScanner';
 import { AerodromeScanner }        from '../scanners/aerodromeScanner';
 import { getGasForecast }          from '../execution/gasForecaster';
-import { checkCircuitBreaker }     from '../risk/circuitBreaker';
+import { checkCircuitBreaker, setInitialBalance } from '../risk/circuitBreaker';
 import { acquireLock }             from '../risk/networkMutex';
 import { ethers }                  from 'ethers';
 
@@ -131,6 +131,8 @@ async function main(): Promise<void> {
   // ── Circuit breaker check every 30s (live only — dry run has no wallet balance) ─
   const monitorAddress = process.env.WALLET_ADDRESS ?? process.env.MONITOR_ADDRESS ?? '';
   if (monitorAddress) {
+    const initBal = await provider.getBalance(monitorAddress);
+    setInitialBalance(initBal);
     setInterval(() => checkCircuitBreaker(provider, monitorAddress), 30_000);
   }
 
