@@ -39,6 +39,7 @@ export class AerodromeSignal {
     pair:        { tokenIn: string; tokenOut: string; name: string; stable: boolean },
     loanAmount:  bigint,
     blockNumber: number,
+    ethPriceUsd: bigint = 3_000_000_000n,
   ): Promise<AerodromeSpreadResult | null> {
     try {
       const factory = CONFIG.CONTRACTS.AERODROME_FACTORY;
@@ -114,7 +115,12 @@ export class AerodromeSignal {
         `${pair.name} spread=${spreadBps}bps buy=${bestBuyDex} sell=${bestSellDex}`
       );
 
-      const grossUsd = Math.max(0, usdcToUsd(bestSellOut - loanAmount));
+      const grossProfitRaw = bestSellOut > loanAmount ? bestSellOut - loanAmount : 0n;
+      const isWethIn = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.WETH.toLowerCase();
+      const grossUsd = isWethIn
+        ? Math.max(0, usdcToUsd(grossProfitRaw * ethPriceUsd / 10n ** 18n))
+        : Math.max(0, usdcToUsd(grossProfitRaw));
+      const gasUsd = 0.0003 * (Number(ethPriceUsd) / 1e6);
 
       const opp: Opportunity = {
         timestamp:        new Date().toISOString(),
@@ -136,7 +142,7 @@ export class AerodromeSignal {
         cexPrice:         null,
         spreadBps,
         grossProfitUsd:   grossUsd,
-        netProfitUsd:     parseFloat(Math.max(0, grossUsd - 0.90 - grossUsd * 0.0005).toFixed(4)),
+        netProfitUsd:     parseFloat(Math.max(0, grossUsd - gasUsd - grossUsd * 0.0005).toFixed(4)),
         gasEstimate:      '0.0003',
         slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(loanAmount) / 1e12) * 10)),
         flashLoanFeeEst:  0,
@@ -156,7 +162,7 @@ export class AerodromeSignal {
         sellDex:     bestSellDex,
         spreadBps,
         loanAmount,
-        grossProfit: bestSellOut > loanAmount ? bestSellOut - loanAmount : 0n,
+        grossProfit: grossProfitRaw,
         opportunity: isOpportunity ? opp : null,
       };
     } catch (err: any) {

@@ -94,7 +94,13 @@ async function main(): Promise<void> {
   }
 
   // ── Block loop ───────────────────────────────────────────────────────────────
+  let handlerActive = false;
   provider.on('block', async (blockNum: number) => {
+    if (handlerActive) {
+      logger.debug('MAIN', `Block ${blockNum} skipped — previous scan still running`);
+      return;
+    }
+    handlerActive = true;
     stats.blocks++;
 
     try {
@@ -104,7 +110,7 @@ async function main(): Promise<void> {
         cbethScanner?.scan(provider, blockNum)    ?? Promise.resolve(null),
         pairScanner?.scan(blockNum, ethPrice)     ?? Promise.resolve(null),
         triScanner?.scan(blockNum)                ?? Promise.resolve(null),
-        aeroScanner?.scan(blockNum)               ?? Promise.resolve(null),
+        aeroScanner?.scan(blockNum, ethPrice)     ?? Promise.resolve(null),
       ]);
 
       if (cbethResult)  { stats.cbeth.scans      += cbethResult.scanned;  stats.cbeth.opps      += cbethResult.opportunities.length;  stats.cbeth.errors      += cbethResult.errors; }
@@ -125,6 +131,8 @@ async function main(): Promise<void> {
     } catch (err: any) {
       logError({ timestamp: new Date().toISOString(), block: blockNum, error: err.message });
       logger.error('BLOCK', `Block ${blockNum} scan failed: ${err.message}`);
+    } finally {
+      handlerActive = false;
     }
   });
 

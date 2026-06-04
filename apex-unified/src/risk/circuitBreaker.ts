@@ -1,7 +1,7 @@
 import { ethers }    from 'ethers';
 import CONFIG, { weiToEth } from '../core/config';
 import { logger }    from '../core/logger';
-import { sendAlert } from '../infrastructure/telegramAlert';
+import { alertCircuitBreaker } from '../infrastructure/telegramAlert';
 import { killStrategy } from './strategyKillSwitch';
 import { StrategyId }   from '../types/Opportunity';
 
@@ -34,7 +34,7 @@ export async function checkCircuitBreaker(provider: ethers.Provider, address: st
       const msg = `Circuit breaker: ${drawdownPct.toFixed(1)}% drawdown — halting all execution`;
       logger.error('CIRCUIT', msg);
       for (const id of ALL_STRATEGIES) killStrategy(id, 'circuit breaker triggered');
-      await sendAlert(msg);
+      await alertCircuitBreaker(msg);
       process.exit(1);
     }
   } catch (err: any) {

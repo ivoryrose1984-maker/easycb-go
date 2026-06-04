@@ -1,5 +1,4 @@
 import { ethers }   from 'ethers';
-import { createHash } from 'crypto';
 import CONFIG, { usdcToUsd } from '../core/config';
 import { Opportunity } from '../types/Opportunity';
 import { opportunityHash } from '../core/dedup';
@@ -14,48 +13,35 @@ interface PathCandidate {
   fees:   [number, number, number];
 }
 
-const STABLE = new Set([
-  CONFIG.TOKENS.USDC.toLowerCase(),
-  CONFIG.TOKENS.USDT.toLowerCase(),
-  CONFIG.TOKENS.DAI.toLowerCase(),
-  CONFIG.TOKENS.USDbC.toLowerCase(),
-]);
-const MAJOR = new Set([
-  CONFIG.TOKENS.WETH.toLowerCase(),
-  CONFIG.TOKENS.cbBTC.toLowerCase(),
-  CONFIG.TOKENS.cbETH.toLowerCase(),
-]);
-
-function feeTiers(a: string, b: string): number[] {
-  if (STABLE.has(a.toLowerCase()) && STABLE.has(b.toLowerCase())) return [100, 500];
-  if (STABLE.has(a.toLowerCase()) || STABLE.has(b.toLowerCase()))  return [500, 3000];
-  if (MAJOR.has(a.toLowerCase())  && MAJOR.has(b.toLowerCase()))   return [500, 3000];
-  return [3000];
-}
-
+// Static whitelist of known-liquid 3-hop paths on Base (USDC round-trip).
+// Replaces dynamic cartesian product (~180 paths) to keep RPC load under control.
+// Each entry makes at most 3 sequential staticCalls; total ≤ 57 calls/block.
 function buildCandidates(): PathCandidate[] {
-  const base   = CONFIG.TOKENS.USDC;
-  const others = [
-    CONFIG.TOKENS.WETH, CONFIG.TOKENS.USDT, CONFIG.TOKENS.DAI,
-    CONFIG.TOKENS.cbETH, CONFIG.TOKENS.cbBTC, CONFIG.TOKENS.AERO,
-  ].filter(Boolean);
-
-  const out: PathCandidate[] = [];
-  for (let i = 0; i < others.length; i++) {
-    const mid = others[i];
-    for (let j = 0; j < others.length; j++) {
-      if (i === j) continue;
-      const end = others[j];
-      for (const f1 of feeTiers(base, mid)) {
-        for (const f2 of feeTiers(mid, end)) {
-          for (const f3 of feeTiers(end, base)) {
-            out.push({ tokens: [base, mid, end], fees: [f1, f2, f3] });
-          }
-        }
-      }
-    }
-  }
-  return out;
+  const { USDC, WETH, USDT, DAI, cbETH, cbBTC, AERO } = CONFIG.TOKENS;
+  return [
+    // ── cbETH ↔ WETH ────────────────────────────────────────────────────────
+    { tokens: [USDC, WETH, cbETH], fees: [ 500,  500, 3000] },
+    { tokens: [USDC, WETH, cbETH], fees: [ 500,  500,  500] },
+    { tokens: [USDC, WETH, cbETH], fees: [3000,  500, 3000] },
+    { tokens: [USDC, cbETH, WETH], fees: [3000,  500,  500] },
+    { tokens: [USDC, cbETH, WETH], fees: [3000,  500, 3000] },
+    { tokens: [USDC, cbETH, WETH], fees: [ 500,  500,  500] },
+    // ── cbBTC ↔ WETH ────────────────────────────────────────────────────────
+    { tokens: [USDC, WETH, cbBTC], fees: [ 500, 3000, 3000] },
+    { tokens: [USDC, WETH, cbBTC], fees: [3000, 3000, 3000] },
+    { tokens: [USDC, cbBTC, WETH], fees: [3000, 3000,  500] },
+    { tokens: [USDC, cbBTC, WETH], fees: [3000, 3000, 3000] },
+    // ── USDT / DAI stablecoin legs ───────────────────────────────────────────
+    { tokens: [USDC, USDT, WETH],  fees: [ 100,  500,  500] },
+    { tokens: [USDC, USDT, WETH],  fees: [ 100,  500, 3000] },
+    { tokens: [USDC, WETH, USDT],  fees: [ 500,  500,  100] },
+    { tokens: [USDC, WETH, USDT],  fees: [3000,  500,  100] },
+    { tokens: [USDC, DAI,  WETH],  fees: [ 100,  500,  500] },
+    { tokens: [USDC, WETH, DAI],   fees: [ 500,  500,  100] },
+    // ── AERO ────────────────────────────────────────────────────────────────
+    { tokens: [USDC, WETH, AERO],  fees: [ 500, 3000, 3000] },
+    { tokens: [USDC, AERO, WETH],  fees: [3000, 3000,  500] },
+  ];
 }
 
 const CANDIDATES: PathCandidate[] = buildCandidates();

@@ -42,8 +42,12 @@ export function alertOpportunity(strategyId: string, bps: number, blockNum: numb
   sendAlert(`Opportunity\nStrategy: ${strategyId}\nSpread: ${bps}bps\nBlock: ${blockNum}`);
 }
 
-export function alertCircuitBreaker(msg: string): void {
-  sendPriority(`CIRCUIT BREAKER\n${msg}`);
+export function alertCircuitBreaker(msg: string): Promise<void> {
+  if (!bot || !chatId) return Promise.resolve();
+  return bot
+    .sendMessage(chatId, `🚨 *ApexUnified*\n\nCIRCUIT BREAKER\n${msg}`, { parse_mode: 'Markdown' })
+    .then(() => {})
+    .catch(err => { logger.error('TG', `Circuit breaker alert failed: ${err}`); });
 }
 
 export function alertError(msg: string): void {

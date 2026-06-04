@@ -1,9 +1,8 @@
 import CONFIG from '../core/config';
 import { logger } from '../core/logger';
 
-let dailyLossUsd    = 0;
-let perTradeLossUsd = 0;
-let lastResetDay    = new Date().toDateString();
+let dailyLossUsd = 0;
+let lastResetDay = new Date().toDateString();
 
 function checkReset(): void {
   const today = new Date().toDateString();

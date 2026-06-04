@@ -121,7 +121,13 @@ export class DexSpreadSignal {
         `${pair.name} spread=${spreadBps}bps buy=${bestBuy.dex}@${bestBuy.fee} sell=${bestSell.dex}@${bestSell.fee}`
       );
 
-      const grossUsd = Math.max(0, usdcToUsd(bestSell.out - loanAmount));
+      const grossProfitRaw = bestSell.out > loanAmount ? bestSell.out - loanAmount : 0n;
+      const isWethIn = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.WETH.toLowerCase();
+      // WETH profit is 18-dec; convert via eth price before usdcToUsd (which divides by 1e6)
+      const grossUsd = isWethIn
+        ? Math.max(0, usdcToUsd(grossProfitRaw * ethPriceUsd / 10n ** 18n))
+        : Math.max(0, usdcToUsd(grossProfitRaw));
+      const gasUsd = 0.0003 * (Number(ethPriceUsd) / 1e6);
 
       const opp: Opportunity = {
         timestamp:        new Date().toISOString(),
@@ -143,7 +149,7 @@ export class DexSpreadSignal {
         cexPrice:         null,
         spreadBps,
         grossProfitUsd:   grossUsd,
-        netProfitUsd:     parseFloat(Math.max(0, grossUsd - 0.90 - grossUsd * 0.0005).toFixed(4)),
+        netProfitUsd:     parseFloat(Math.max(0, grossUsd - gasUsd - grossUsd * 0.0005).toFixed(4)),
         gasEstimate:      '0.0003',
         slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(loanAmount) / 1e12) * 10)),
         flashLoanFeeEst:  0,
@@ -165,7 +171,7 @@ export class DexSpreadSignal {
         sellFee:     bestSell.fee,
         spreadBps,
         loanAmount,
-        grossProfit: bestSell.out > loanAmount ? bestSell.out - loanAmount : 0n,
+        grossProfit: grossProfitRaw,
         opportunity: isOpportunity ? opp : null,
       };
     } catch (err: any) {

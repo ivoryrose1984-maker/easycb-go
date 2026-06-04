@@ -22,7 +22,7 @@ export class AerodromeScanner {
     this.signal = new AerodromeSignal(provider);
   }
 
-  async scan(blockNumber: number): Promise<StrategyResult> {
+  async scan(blockNumber: number, ethPriceUsd: bigint = 3_000_000_000n): Promise<StrategyResult> {
     const t0         = Date.now();
     const strategyId = 'apex.aerodrome_spread' as const;
 
@@ -39,7 +39,7 @@ export class AerodromeScanner {
 
     const results = await Promise.allSettled(
       probes.map(({ pair, loanAmount }) =>
-        this.signal.scan(pair, loanAmount, blockNumber)
+        this.signal.scan(pair, loanAmount, blockNumber, ethPriceUsd)
       )
     );
 
