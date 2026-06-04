@@ -24,11 +24,22 @@ export class ApexTriangularScanner {
 
     const results = await this.signal.scan(CONFIG.MIN_LOAN_USDC, blockNumber, ethPriceUsd);
 
-    logSignal(strategyId, {
-      blockNumber,
-      candidatesScanned: results.length,
-      opportunities:     results.filter(r => r.opportunity).length,
-    });
+    // Log every path individually — sub-threshold included — so bps distribution
+    // is captured for MIN_NET_EDGE_BPS tuning during the dry run.
+    for (const r of results) {
+      const hasOpp = !!r.opportunity;
+      logSignal(strategyId, {
+        blockNumber,
+        route:     `${r.tokens[0].slice(0,8)}→${r.tokens[1].slice(0,8)}→${r.tokens[2].slice(0,8)}`,
+        fees:      r.fees,
+        spreadBps: r.spreadBps,
+        grossProfitUsd: r.opportunity?.grossProfitUsd ?? 0,
+        hasOpp,
+      });
+      if (!hasOpp) {
+        logRejection({ strategyId, blockNumber, fees: r.fees, spreadBps: r.spreadBps, reason: `spread=${r.spreadBps}bps below threshold` });
+      }
+    }
 
     const accepted = [];
     for (const r of results) {
