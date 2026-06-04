@@ -164,6 +164,7 @@ jobs:
             ENABLE_DEX_SPREAD_SIGNAL=true
             ENABLE_TRIANGULAR_SIGNAL=true
             ENABLE_CBETH_SIGNAL=true
+            ENABLE_AERODROME_SIGNAL=true
             ENABLE_CEX_CONTEXT=true
             ENABLE_FLASH_LOAN_PLANNER=false
             ENABLE_BUILDER_SUBMISSION=false
@@ -264,5 +265,8 @@ jobs:
             tail -60 /var/log/apex/unified.log
             echo ""
             echo "=== JSONL opportunity count ==="
-            find /opt/apex/apex-unified/logs -name "opportunities-*.jsonl" \
+            find /opt/apex/apex-unified/logs -name "unified-opportunities-*.jsonl" \
               -exec wc -l {} \; 2>/dev/null || echo "No JSONL files yet (normal if <1 block)"
+            echo "=== Signal log files ==="
+            find /opt/apex/apex-unified/logs -name "unified-signals-*.jsonl" \
+              -exec echo {} \; 2>/dev/null || echo "No signal logs yet"
