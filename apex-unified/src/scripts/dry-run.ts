@@ -109,7 +109,7 @@ async function main(): Promise<void> {
       const [cbethResult, pairResult, triResult, aeroResult] = await Promise.all([
         cbethScanner?.scan(provider, blockNum)    ?? Promise.resolve(null),
         pairScanner?.scan(blockNum, ethPrice)     ?? Promise.resolve(null),
-        triScanner?.scan(blockNum)                ?? Promise.resolve(null),
+        triScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
         aeroScanner?.scan(blockNum, ethPrice)     ?? Promise.resolve(null),
       ]);
 

@@ -14,7 +14,7 @@ export class ApexTriangularScanner {
     this.signal = new TriangularArbSignal(provider);
   }
 
-  async scan(blockNumber: number): Promise<StrategyResult> {
+  async scan(blockNumber: number, ethPriceUsd: bigint = 3_000_000_000n): Promise<StrategyResult> {
     const t0         = Date.now();
     const strategyId = 'apex.triangular' as const;
 
@@ -22,7 +22,7 @@ export class ApexTriangularScanner {
       return { strategyId, scanned: 0, opportunities: [], errors: 0, durationMs: 0 };
     }
 
-    const results = await this.signal.scan(CONFIG.MIN_LOAN_USDC, blockNumber);
+    const results = await this.signal.scan(CONFIG.MIN_LOAN_USDC, blockNumber, ethPriceUsd);
 
     logSignal(strategyId, {
       blockNumber,

@@ -63,9 +63,9 @@ export class TriangularArbSignal {
     this.quoter = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER, QUOTER_ABI, provider);
   }
 
-  async scan(amountIn: bigint, blockNumber: number): Promise<TriangularResult[]> {
+  async scan(amountIn: bigint, blockNumber: number, ethPriceUsd: bigint = 3_000_000_000n): Promise<TriangularResult[]> {
     const results = await Promise.allSettled(
-      CANDIDATES.map(c => this.simulate(c.tokens, c.fees, amountIn, blockNumber))
+      CANDIDATES.map(c => this.simulate(c.tokens, c.fees, amountIn, blockNumber, ethPriceUsd))
     );
 
     const opportunities: TriangularResult[] = [];
@@ -80,10 +80,11 @@ export class TriangularArbSignal {
   }
 
   private async simulate(
-    tokens:   [string, string, string],
-    fees:     [number, number, number],
-    amountIn: bigint,
-    blockNumber: number
+    tokens:      [string, string, string],
+    fees:        [number, number, number],
+    amountIn:    bigint,
+    blockNumber: number,
+    ethPriceUsd: bigint,
   ): Promise<TriangularResult | null> {
     try {
       const q1 = await this.quoter.quoteExactInputSingle.staticCall({
@@ -144,7 +145,7 @@ export class TriangularArbSignal {
         spreadBps,
         grossProfitUsd:   usdcToUsd(grossProfit),
         netProfitUsd:     parseFloat(Math.max(0,
-          usdcToUsd(grossProfit) - 0.90 - usdcToUsd(grossProfit) * 0.0015
+          usdcToUsd(grossProfit) - (0.0003 * (Number(ethPriceUsd) / 1e6)) - usdcToUsd(grossProfit) * 0.0015
         ).toFixed(4)),
         gasEstimate:      '0.0003',
         slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(amountIn) / 1e12) * 10)),
