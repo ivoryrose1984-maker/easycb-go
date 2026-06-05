@@ -180,11 +180,25 @@ async function main(): Promise<void> {
   }, 60 * 60 * 1_000);
 
   // ── Graceful shutdown ─────────────────────────────────────────────────────────
-  process.on('SIGINT', async () => {
-    logger.info('MAIN', 'Graceful shutdown');
+  async function shutdown(signal: string) {
+    logger.info('MAIN', `${signal} received — shutting down`);
     await provider.destroy();
     process.exit(0);
-  });
+  }
+  process.on('SIGINT',  () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // ── WebSocket heartbeat — alert if blocks stop arriving (silent WS death) ────
+  let lastBlockMs = Date.now();
+  provider.on('block', () => { lastBlockMs = Date.now(); });
+  setInterval(() => {
+    const silentMs = Date.now() - lastBlockMs;
+    if (silentMs > 30_000) {
+      const msg = `No block received in ${Math.round(silentMs / 1000)}s — WebSocket may be dead`;
+      logger.error('MAIN', msg);
+      sendAlert(msg);
+    }
+  }, 15_000);
 }
 
 main().catch(err => {

@@ -183,7 +183,11 @@ contract ApexFlashLoan {
         address uniV3Router,
         bytes calldata path,
         uint256 minAmountOut
-    ) external onlyOwner nonReentrant whenNotPaused {
+    ) external onlyOwner whenNotPaused {
+        // nonReentrant intentionally omitted here: adding it would deadlock the
+        // Balancer callback (receiveFlashLoan runs inside this call stack with
+        // _status already set to 2). Access is already restricted to owner.
+        // receiveFlashLoan carries the nonReentrant guard instead.
         require(approvedRouters[uniV3Router], "Router not approved");
         require(flashToken != address(0), "Zero token");
         require(flashAmount > 0, "Zero amount");
