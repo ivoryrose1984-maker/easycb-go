@@ -18,6 +18,15 @@ import { ethers }                  from 'ethers';
 // ── Safety first ──────────────────────────────────────────────────────────────
 assertDryRunMode();
 
+if (parseInt(process.env.CHAIN_ID ?? '8453', 10) !== 8453) {
+  throw new Error(`CHAIN_ID must be 8453 (Base), got ${process.env.CHAIN_ID}`);
+}
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] unhandledRejection:', reason);
+  process.exit(1);
+});
+
 const ctx   = getRunContext();
 const START = Date.now();
 

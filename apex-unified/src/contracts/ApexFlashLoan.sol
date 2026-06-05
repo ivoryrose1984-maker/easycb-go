@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity 0.8.19;
 
 // Deploy to Base. Uses Balancer V2 flash loans (0% fee).
 // Executes an arbitrary Uniswap V3 exactInput multi-hop path with borrowed funds.
