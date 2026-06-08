@@ -10,7 +10,6 @@ import { CbEthFairValueScanner }   from '../scanners/cbETHFairValueScanner';
 import { ApexPairScanner }         from '../scanners/apexPairScanner';
 import { ApexTriangularScanner }   from '../scanners/apexTriangularScanner';
 import { AerodromeScanner }        from '../scanners/aerodromeScanner';
-import { getGasForecast }          from '../execution/gasForecaster';
 import { checkCircuitBreaker, setInitialBalance } from '../risk/circuitBreaker';
 import { acquireLock }             from '../risk/networkMutex';
 import { ethers }                  from 'ethers';
@@ -27,72 +26,61 @@ process.on('unhandledRejection', (reason) => {
   process.exit(1);
 });
 
-const ctx   = getRunContext();
-const START = Date.now();
+const runCtx = getRunContext();
+const START  = Date.now();
 
 const stats = {
-  blocks:        0,
-  dexSpread:     { scans: 0, opps: 0, errors: 0 },
-  triangular:    { scans: 0, opps: 0, errors: 0 },
-  cbeth:         { scans: 0, opps: 0, errors: 0 },
-  aerodrome:     { scans: 0, opps: 0, errors: 0 },
+  blocks:     0,
+  dexSpread:  { scans: 0, opps: 0, errors: 0 },
+  triangular: { scans: 0, opps: 0, errors: 0 },
+  cbeth:      { scans: 0, opps: 0, errors: 0 },
+  aerodrome:  { scans: 0, opps: 0, errors: 0 },
 };
 
-// ── Main ──────────────────────────────────────────────────────────────────────
-async function main(): Promise<void> {
-  console.log('╔═══════════════════════════════════════════════════════════════╗');
-  console.log('║         A P E X   U N I F I E D   B O T                     ║');
-  console.log('║  Atlas thinks  ·  Grok sees  ·  Apex executes                ║');
-  console.log('╚═══════════════════════════════════════════════════════════════╝');
-  console.log(`  BOT_ID:      ${ctx.botId}`);
-  console.log(`  RUN_ID:      ${ctx.runId}`);
-  console.log(`  CHAIN:       Base (${ctx.chainId})`);
-  console.log(`  MODE:        DRY RUN — zero transactions`);
-  console.log(`  Strategies:  ${[
-    CONFIG.ENABLE_DEX_SPREAD_SIGNAL  ? 'apex.dex_spread'         : '',
-    CONFIG.ENABLE_TRIANGULAR_SIGNAL  ? 'apex.triangular'         : '',
-    CONFIG.ENABLE_CBETH_SIGNAL       ? 'grok.cbeth_fair_value'   : '',
-    CONFIG.ENABLE_AERODROME_SIGNAL   ? 'apex.aerodrome_spread'   : '',
-  ].filter(Boolean).join(', ')}`);
-  console.log('');
+// ── Mutable state shared across reconnects ────────────────────────────────────
+let currentProvider: ethers.WebSocketProvider;
+let handlerActive  = false;
+let lastBlockMs    = Date.now();
+let reconnecting   = false;
 
-  if (!acquireLock()) {
-    logger.error('MAIN', 'Another instance is running on this chain — exiting');
-    process.exit(1);
-  }
+const QUOTER_ABI = [
+  'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
+];
 
-  await initTelegram();
-  sendAlert(`ApexUnified started\nRun ID: ${ctx.runId}\nMode: DRY RUN\nChain: Base`);
+// ── Provider context (recreated on each reconnect) ────────────────────────────
+interface BotContext {
+  provider:     ethers.WebSocketProvider;
+  quoter:       ethers.Contract;
+  cbethScanner: CbEthFairValueScanner  | null;
+  pairScanner:  ApexPairScanner        | null;
+  triScanner:   ApexTriangularScanner  | null;
+  aeroScanner:  AerodromeScanner       | null;
+}
 
-  if (CONFIG.ENABLE_CEX_CONTEXT) {
-    logger.info('MAIN', 'Starting Binance CEX feed...');
-    getCexFeed();
-    await new Promise(r => setTimeout(r, 2_000));
-  }
+function buildContext(p: ethers.WebSocketProvider): BotContext {
+  return {
+    provider:     p,
+    quoter:       new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER, QUOTER_ABI, p),
+    cbethScanner: CONFIG.ENABLE_CBETH_SIGNAL      ? new CbEthFairValueScanner(p)  : null,
+    pairScanner:  CONFIG.ENABLE_DEX_SPREAD_SIGNAL  ? new ApexPairScanner(p)        : null,
+    triScanner:   CONFIG.ENABLE_TRIANGULAR_SIGNAL  ? new ApexTriangularScanner(p)  : null,
+    aeroScanner:  CONFIG.ENABLE_AERODROME_SIGNAL   ? new AerodromeScanner(p)       : null,
+  };
+}
 
-  logger.info('MAIN', 'Connecting to Base via WebSocket...');
-  const provider = await createWsProvider(CONFIG.ALCHEMY_WSS_URL);
-  logger.info('MAIN', 'Connected');
+function registerHandlers(ctx: BotContext): void {
+  handlerActive = false;
 
-  const cbethScanner  = CONFIG.ENABLE_CBETH_SIGNAL      ? new CbEthFairValueScanner(provider)  : null;
-  const pairScanner   = CONFIG.ENABLE_DEX_SPREAD_SIGNAL  ? new ApexPairScanner(provider)        : null;
-  const triScanner    = CONFIG.ENABLE_TRIANGULAR_SIGNAL  ? new ApexTriangularScanner(provider)  : null;
-  const aeroScanner   = CONFIG.ENABLE_AERODROME_SIGNAL   ? new AerodromeScanner(provider)       : null;
-
-  const QUOTER_ABI = [
-    'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
-  ];
-  const quoter = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER, QUOTER_ABI, provider);
-
-  let cachedEthPrice    = 0n;
-  let lastEthPriceMs    = 0;
+  // Per-context ETH price cache (reset on reconnect is fine)
+  let cachedEthPrice = 0n;
+  let lastEthPriceMs = 0;
 
   async function getEthPrice(): Promise<bigint> {
     if (cachedEthPrice > 0n && Date.now() - lastEthPriceMs < CONFIG.ETH_PRICE_CACHE_MS) {
       return cachedEthPrice;
     }
     try {
-      const r = await quoter.quoteExactInputSingle.staticCall({
+      const r = await ctx.quoter.quoteExactInputSingle.staticCall({
         tokenIn: CONFIG.TOKENS.WETH, tokenOut: CONFIG.TOKENS.USDC,
         amountIn: ethers.parseEther('1'), fee: 3000, sqrtPriceLimitX96: 0,
       });
@@ -102,9 +90,11 @@ async function main(): Promise<void> {
     } catch { return 3_000_000_000n; }
   }
 
-  // ── Block loop ───────────────────────────────────────────────────────────────
-  let handlerActive = false;
-  provider.on('block', async (blockNum: number) => {
+  // Update heartbeat timestamp on every block
+  ctx.provider.on('block', () => { lastBlockMs = Date.now(); });
+
+  // Main block handler
+  ctx.provider.on('block', async (blockNum: number) => {
     if (handlerActive) {
       logger.debug('MAIN', `Block ${blockNum} skipped — previous scan still running`);
       return;
@@ -116,10 +106,10 @@ async function main(): Promise<void> {
       const ethPrice = await getEthPrice();
 
       const [cbethResult, pairResult, triResult, aeroResult] = await Promise.all([
-        cbethScanner?.scan(provider, blockNum)    ?? Promise.resolve(null),
-        pairScanner?.scan(blockNum, ethPrice)     ?? Promise.resolve(null),
-        triScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
-        aeroScanner?.scan(blockNum, ethPrice)     ?? Promise.resolve(null),
+        ctx.cbethScanner?.scan(ctx.provider, blockNum) ?? Promise.resolve(null),
+        ctx.pairScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
+        ctx.triScanner?.scan(blockNum, ethPrice)       ?? Promise.resolve(null),
+        ctx.aeroScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
       ]);
 
       if (cbethResult)  { stats.cbeth.scans      += cbethResult.scanned;  stats.cbeth.opps      += cbethResult.opportunities.length;  stats.cbeth.errors      += cbethResult.errors; }
@@ -144,40 +134,101 @@ async function main(): Promise<void> {
       handlerActive = false;
     }
   });
+}
 
-  // ── Circuit breaker check every 30s (live only — dry run has no wallet balance) ─
-  const monitorAddress = process.env.WALLET_ADDRESS ?? process.env.MONITOR_ADDRESS ?? '';
-  if (monitorAddress) {
-    const initBal = await provider.getBalance(monitorAddress);
-    setInitialBalance(initBal);
-    setInterval(() => checkCircuitBreaker(provider, monitorAddress), 30_000);
+// ── WebSocket reconnect ───────────────────────────────────────────────────────
+async function reconnect(): Promise<void> {
+  if (reconnecting) return;
+  reconnecting = true;
+  logger.warn('MAIN', 'Reconnecting WebSocket to Base...');
+  try {
+    try { await currentProvider.destroy(); } catch { /* ignore */ }
+    currentProvider = await createWsProvider(CONFIG.ALCHEMY_WSS_URL);
+    const ctx = buildContext(currentProvider);
+    registerHandlers(ctx);
+    lastBlockMs = Date.now();
+    logger.info('MAIN', 'WebSocket reconnected — scanning resumed');
+    sendAlert('WebSocket reconnected — dry run resumed');
+  } catch (err: any) {
+    logger.error('MAIN', `Reconnect failed: ${err.message} — will retry in 30s`);
+    alertError(`Reconnect failed: ${err.message}`);
+    // Reset so heartbeat can trigger another attempt
+    lastBlockMs = Date.now() - 25_000;
+  } finally {
+    reconnecting = false;
+  }
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+async function main(): Promise<void> {
+  console.log('╔═══════════════════════════════════════════════════════════════╗');
+  console.log('║         A P E X   U N I F I E D   B O T                     ║');
+  console.log('║  Atlas thinks  ·  Grok sees  ·  Apex executes                ║');
+  console.log('╚═══════════════════════════════════════════════════════════════╝');
+  console.log(`  BOT_ID:      ${runCtx.botId}`);
+  console.log(`  RUN_ID:      ${runCtx.runId}`);
+  console.log(`  CHAIN:       Base (${runCtx.chainId})`);
+  console.log(`  MODE:        DRY RUN — zero transactions`);
+  console.log(`  Strategies:  ${[
+    CONFIG.ENABLE_DEX_SPREAD_SIGNAL  ? 'apex.dex_spread'         : '',
+    CONFIG.ENABLE_TRIANGULAR_SIGNAL  ? 'apex.triangular'         : '',
+    CONFIG.ENABLE_CBETH_SIGNAL       ? 'grok.cbeth_fair_value'   : '',
+    CONFIG.ENABLE_AERODROME_SIGNAL   ? 'apex.aerodrome_spread'   : '',
+  ].filter(Boolean).join(', ')}`);
+  console.log('');
+
+  if (!acquireLock()) {
+    logger.error('MAIN', 'Another instance is running on this chain — exiting');
+    process.exit(1);
   }
 
-  // ── Hourly summary ────────────────────────────────────────────────────────────
+  await initTelegram();
+  sendAlert(`ApexUnified started\nRun ID: ${runCtx.runId}\nMode: DRY RUN\nChain: Base`);
+
+  if (CONFIG.ENABLE_CEX_CONTEXT) {
+    logger.info('MAIN', 'Starting Binance CEX feed...');
+    getCexFeed();
+    await new Promise(r => setTimeout(r, 2_000));
+  }
+
+  logger.info('MAIN', 'Connecting to Base via WebSocket...');
+  currentProvider = await createWsProvider(CONFIG.ALCHEMY_WSS_URL);
+  logger.info('MAIN', 'Connected');
+
+  const ctx = buildContext(currentProvider);
+  registerHandlers(ctx);
+
+  // ── Circuit breaker ───────────────────────────────────────────────────────
+  const monitorAddress = process.env.WALLET_ADDRESS ?? process.env.MONITOR_ADDRESS ?? '';
+  if (monitorAddress) {
+    const initBal = await currentProvider.getBalance(monitorAddress);
+    setInitialBalance(initBal);
+    setInterval(() => checkCircuitBreaker(currentProvider, monitorAddress), 30_000);
+  }
+
+  // ── Hourly summary ────────────────────────────────────────────────────────
   setInterval(() => {
     const up = uptime(START);
     const summary = {
-      timestamp:     new Date().toISOString(),
-      run_id:        ctx.runId,
-      uptime:        up,
-      blocks:        stats.blocks,
-      cbeth_opps:    stats.cbeth.opps,
-      dex_opps:      stats.dexSpread.opps,
-      tri_opps:      stats.triangular.opps,
-      aero_opps:     stats.aerodrome.opps,
-      total_opps:    stats.cbeth.opps + stats.dexSpread.opps + stats.triangular.opps + stats.aerodrome.opps,
-      errors:        stats.cbeth.errors + stats.dexSpread.errors + stats.triangular.errors + stats.aerodrome.errors,
+      timestamp:   new Date().toISOString(),
+      run_id:      runCtx.runId,
+      uptime:      up,
+      blocks:      stats.blocks,
+      cbeth_opps:  stats.cbeth.opps,
+      dex_opps:    stats.dexSpread.opps,
+      tri_opps:    stats.triangular.opps,
+      aero_opps:   stats.aerodrome.opps,
+      total_opps:  stats.cbeth.opps + stats.dexSpread.opps + stats.triangular.opps + stats.aerodrome.opps,
+      errors:      stats.cbeth.errors + stats.dexSpread.errors + stats.triangular.errors + stats.aerodrome.errors,
     };
 
     logSummary(summary);
-
     logger.info('HOURLY',
       `${up} | blocks=${stats.blocks} | ` +
       `total_opps=${summary.total_opps} ` +
       `(cbeth=${stats.cbeth.opps} dex=${stats.dexSpread.opps} tri=${stats.triangular.opps} aero=${stats.aerodrome.opps}) ` +
       `errors=${summary.errors}`
     );
-
     sendAlert(
       `Hourly summary — ${up}\n` +
       `Blocks: ${stats.blocks}\n` +
@@ -188,24 +239,23 @@ async function main(): Promise<void> {
     );
   }, 60 * 60 * 1_000);
 
-  // ── Graceful shutdown ─────────────────────────────────────────────────────────
+  // ── Graceful shutdown ─────────────────────────────────────────────────────
   async function shutdown(signal: string) {
     logger.info('MAIN', `${signal} received — shutting down`);
-    await provider.destroy();
+    try { await currentProvider.destroy(); } catch { /* ignore */ }
     process.exit(0);
   }
   process.on('SIGINT',  () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  // ── WebSocket heartbeat — alert if blocks stop arriving (silent WS death) ────
-  let lastBlockMs = Date.now();
-  provider.on('block', () => { lastBlockMs = Date.now(); });
-  setInterval(() => {
+  // ── WebSocket heartbeat + auto-reconnect ──────────────────────────────────
+  setInterval(async () => {
     const silentMs = Date.now() - lastBlockMs;
     if (silentMs > 30_000) {
-      const msg = `No block received in ${Math.round(silentMs / 1000)}s — WebSocket may be dead`;
+      const msg = `No block in ${Math.round(silentMs / 1000)}s — reconnecting`;
       logger.error('MAIN', msg);
       sendAlert(msg);
+      await reconnect();
     }
   }, 15_000);
 }

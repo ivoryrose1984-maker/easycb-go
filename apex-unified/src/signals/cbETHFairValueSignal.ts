@@ -6,7 +6,12 @@ import { Opportunity } from '../types/Opportunity';
 import { opportunityHash } from '../core/dedup';
 import { logger } from '../core/logger';
 
+// exchangeRate() exists on the Ethereum L1 staking contract but NOT on the Base
+// bridged ERC-20 token (0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22). We try it
+// anyway (works if Coinbase ever adds an oracle), then fall back to a cached estimate.
 const CBETH_ABI  = ['function exchangeRate() view returns (uint256)'];
+// ~1.065 ETH per cbETH — update this periodically until a live oracle is wired up
+const CBETH_FALLBACK_RATE = 1_065_000_000_000_000_000n; // 1.065e18
 const QUOTER_ABI = [
   'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
 ];
@@ -37,9 +42,10 @@ export class CbEthFairValueSignal {
     let exchangeRateRaw: bigint;
     try {
       exchangeRateRaw = await this.cbeth.exchangeRate() as bigint;
-    } catch (err: any) {
-      logger.error('cbETH', `exchangeRate() failed: ${err.message}`);
-      return null;
+    } catch {
+      // Base cbETH is a bridged ERC-20 without exchangeRate() — use fallback
+      logger.debug('cbETH', `exchangeRate() unavailable on Base — using fallback rate`);
+      exchangeRateRaw = CBETH_FALLBACK_RATE;
     }
 
     const fairWethPerCbEth = Number(exchangeRateRaw) / 1e18;

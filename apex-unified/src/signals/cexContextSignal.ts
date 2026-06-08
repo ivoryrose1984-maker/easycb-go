@@ -11,10 +11,16 @@ export interface CexPrice {
 
 const STALE_MS = 5_000;
 
+const CEX_MAX_RECONNECTS  = 8;
+const CEX_BASE_DELAY_MS   = 3_000;
+const CEX_MAX_DELAY_MS    = 300_000; // 5 min cap
+
 class BinanceFeed {
-  private prices = new Map<string, CexPrice>();
-  private ws:     WebSocket | null = null;
-  private reconnectTimer: NodeJS.Timeout | null = null;
+  private prices          = new Map<string, CexPrice>();
+  private ws:               WebSocket | null = null;
+  private reconnectTimer:   NodeJS.Timeout | null = null;
+  private reconnectCount  = 0;
+  private disabled        = false;
 
   constructor(private readonly symbols: string[]) {}
 
@@ -23,11 +29,14 @@ class BinanceFeed {
   }
 
   private connect(): void {
+    if (this.disabled) return;
+
     const streams = this.symbols.map(s => `${s}@bookTicker`).join('/');
     const url = `wss://stream.binance.com:9443/stream?streams=${streams}`;
     this.ws = new WebSocket(url);
 
     this.ws.on('open', () => {
+      this.reconnectCount = 0;
       logger.info('CEX', `Binance feed connected (${this.symbols.join(', ')})`);
     });
 
@@ -47,11 +56,25 @@ class BinanceFeed {
     });
 
     this.ws.on('close', () => {
-      logger.warn('CEX', 'Binance disconnected — reconnecting in 3s');
-      this.reconnectTimer = setTimeout(() => this.connect(), 3_000);
+      if (this.disabled) return;
+      if (this.reconnectCount >= CEX_MAX_RECONNECTS) {
+        logger.warn('CEX', `Binance feed disabled after ${this.reconnectCount} failed reconnects (geo-block or network issue)`);
+        this.disabled = true;
+        return;
+      }
+      const delay = Math.min(CEX_BASE_DELAY_MS * Math.pow(2, this.reconnectCount), CEX_MAX_DELAY_MS);
+      this.reconnectCount++;
+      logger.warn('CEX', `Binance disconnected — reconnect ${this.reconnectCount}/${CEX_MAX_RECONNECTS} in ${Math.round(delay / 1000)}s`);
+      this.reconnectTimer = setTimeout(() => this.connect(), delay);
     });
 
     this.ws.on('error', (err) => {
+      // 451 = geo-blocked (legal block), disable immediately
+      if (err.message.includes('451')) {
+        logger.warn('CEX', 'Binance geo-blocked (HTTP 451) — CEX feed disabled. DEX scanning unaffected.');
+        this.disabled = true;
+        return;
+      }
       logger.error('CEX', `Binance WebSocket error: ${err.message}`);
     });
   }
