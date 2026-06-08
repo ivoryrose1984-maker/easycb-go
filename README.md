@@ -1,225 +1,162 @@
-English | [简体中文](./README_CN.md)
+# Apex Unified — Base L2 Arbitrage Bot
 
-# Easy Cross Border (EasyCb-Go)
+**Atlas thinks. Grok sees. Apex executes.**
 
-Lazada/Tiktok/Shopee/Shein Seller Open Platform SDK For Golang
+Market-neutral arbitrage system targeting Base L2 (chainId 8453).
 
-[![go report card](https://goreportcard.com/badge/github.com/easycb/easycb-go "go report card")](https://goreportcard.com/report/github.com/easycb/easycb-go)
-[![MIT license](https://img.shields.io/badge/license-MIT-brightgreen.svg)](https://opensource.org/licenses/MIT)
-[![Go.Dev reference](https://img.shields.io/badge/go.dev-reference-blue?logo=go&logoColor=white)](https://pkg.go.dev/github.com/easycb/easycb-go)
+---
 
+## Architecture
 
-## Overview
+| Layer | Role |
+|-------|------|
+| **Apex** | Execution engine — flash loans, DEX spread, triangular arb, ternary sizing |
+| **Grok** | Signal quality — cbETH fair-value, Binance CEX feed, dedup, JSONL audit |
+| **Atlas** | Research — backtesting, replay engine, 72-hour reports, parameter optimization |
 
-* Support [Lazada Open Api](https://open.lazada.com/apps/doc/api) 
-* Support [Tiktok Shope Partner Api](https://partner.tiktokshop.com/api/document) `V2`
-* Support [Shopee Open Api](https://open.shopee.com/documents) `V2`
-* Support [Shein Open Api](https://open.sheincorp.com)
-* Every feature comes with tests
-* Developer Friendly
+---
 
-**EasyCb features are support platform:**
-- Shopify
-- Amazon
-- AliExpress
-- ...
+## Strategies
 
-## Getting Started
+| ID | Description |
+|----|-------------|
+| `apex.dex_spread` | DEX cross-fee-tier spread arb (9 pairs, Uni V3 + PancakeSwap V3) |
+| `apex.triangular` | 3-hop USDC cycles (18 static paths, ~54 RPC calls/block max) |
+| `apex.aerodrome_spread` | Aerodrome Solidly AMM cross-DEX arb |
+| `grok.cbeth_fair_value` | cbETH spot price vs on-chain exchangeRate() fair value |
+
+---
+
+## Quick Start
 
 ### Prerequisites
 
-EasyCb requires [Go](https://go.dev/) version [1.17](https://go.dev/doc/devel/release#go1.17.0) or above.
+- Node 22+, npm
+- Alchemy API key (Base mainnet WebSocket)
+- Telegram bot token + chat ID (for alerts)
 
-```sh
-import "github.com/easycb/easycb-go"
+### Install & Build
+
+```bash
+cd apex-unified
+npm install
+npm run build
 ```
 
-Alternatively, use `go get`:
+### Configure
 
-```sh
-go get -u github.com/easycb/easycb-go
+```bash
+cp apex-unified/.env.example apex-unified/.env
+# Edit .env — fill in ALCHEMY_WSS_URL, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 ```
 
-### Running EasyCb
+See `ENV_MASTER_TEMPLATE.txt` for all variables.
 
+### Dry Run
 
-A basic example Lazada open api:
-```go
-package main
-
-import (
-	"fmt"
-	"time"
-	"github.com/easycb/easycb-go"
-	"github.com/easycb/easycb-go/lazada"
-)
-
-func main() {
-	appKey := ""
-	appSecret := ""
-	baseUrl := "https://api.lazada.com.my/rest"
-	accessToken := ""
-	client, err := lazada.NewClient(appKey, appSecret, baseUrl)
-	if err != nil {
-		fmt.Println(err.Error())
-		return
-	}
-	client.SetAccessToken(accessToken)
-
-	query := easycb.AnyMap{
-		"sort_direction": "DESC",
-		"offset":         0,
-		"limit":          100,
-		"sort_by":        "created_at",
-		"created_before": time.Now().Format(time.RFC3339),
-		"created_after":  time.Now().Add(-15 * 24 * time.Hour).Format(time.RFC3339),
-	}
-
-	res, err := client.GetOrders(query)
-	if err != nil {
-		fmt.Println(err.Error())
-		return
-	}
-
-	fmt.Println(res.Code)
-}
+```bash
+cd apex-unified && npm run dry-run
 ```
 
+Or via PM2 from repo root:
 
-A basic example Shopee open api:
-```go
-package main
-
-import (
-	"fmt"
-	"time"
-	"github.com/easycb/easycb-go"
-	"github.com/easycb/easycb-go/shopee"
-)
-
-func main() {
-	partnerId := int64(123456)
-	partnerKey := ""
-	baseUrl := "https://partner.shopeemobile.com"
-	shopId := int64(56789)
-	accessToken := ""
-	client, err := shopee.NewClient(partnerId, partnerKey, baseUrl)
-	if err != nil {
-		return
-	}
-	client.SetShopId(shopId).SetAccessToken(accessToken)
-	
-	
-	query := easycb.AnyMap{
-		"offset":      0,
-		"page_size":   50,
-		"item_status": []string{"NORMAL", "UNLIST"},
-	}
-
-	res, err := client.GetProductList(query)
-	if err != nil {
-		fmt.Println(err.Error())
-		return
-	}
-
-	fmt.Println(res.Message)
-}
+```bash
+bash deploy/start-dryrun.sh
 ```
 
+---
 
-A basic example Tiktok shop partner api:
+## Safety
 
-```go
-package main
+Two independent gates — both must be explicitly overridden to enable live execution:
 
-import (
-	"fmt"
-	"time"
-	"github.com/easycb/easycb-go"
-	"github.com/easycb/easycb-go/tiktok"
-)
-
-func main() {
-	appKey := ""
-	appSecret := ""
-	baseUrl := "https://open-api.tiktokglobalshop.com"
-	accessToken := ""
-	shopCipher := ""
-	client, err := tiktok.NewClient(appKey, appSecret, baseUrl)
-	if err != nil {
-		fmt.Println(err.Error())
-		return
-	}
-	client.SetAccessToken(accessToken).SetShopCipher(shopCipher)
-
-	query := easycb.AnyMap{
-		"page_size": 20,
-	}
-
-	body := easycb.AnyMap{
-		"create_time_ge": time.Now().Add(-15 * 24 * time.Hour).Unix(),
-		"create_time_lt": time.Now().Unix(),
-	}
-	
-	res, err := client.GetOrderList(query, body)
-	if err != nil {
-		fmt.Println(err.Error())
-		return
-	}
-	
-	fmt.Println(res.Code)
-}
+```
+DRY_RUN=true       # default — set false only for live
+ALLOW_LIVE=false   # default — set true only for live
 ```
 
+- `assertDryRunMode()` called at startup — throws if flags are wrong
+- `requireLiveAllowed()` is the first line of `liveExecutor.ts`
+- No private key required or used during dry run
+- Market-neutral only — no sandwiching, no frontrunning
 
-A basic example Shein open api:
+---
 
-```go
-package main
+## Deploy via GitHub Actions
 
-import (
-	"fmt"
-	"time"
-	"github.com/easycb/easycb-go"
-	"github.com/easycb/easycb-go/shein"
-)
+Actions → "Deploy Apex Unified — Dry-Run" → Run workflow → type `deploy-dry-run`
 
-func main() {
-	baseUrl := "https://openapi.sheincorp.com"
-	appId := ""
-	openKeyId := ""
-	secretKey := ""
-	client, err := shein.NewClient(appId, openKeyId, secretKey, baseUrl)
-	if err != nil {
-		fmt.Println(err.Error())
-		return
-	}
+Required GitHub secrets:
 
-	body := easycb.AnyMap{
-		"queryType": 1,
-		"startTime": "2025-05-06 00:00:00",
-		"endTime":   "2025-05-08 00:00:00",
-		"page":      1,
-		"pageSize":  30,
-	}
-	res, err := client.GetOrderList(body)
-	if err != nil {
-		panic(err)
-	}
+| Secret | Description |
+|--------|-------------|
+| `HETZNER_ROOT_PASSWORD` | VPS root password |
+| `ALCHEMY_WSS_URL` | Alchemy WebSocket URL (Base mainnet) |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token |
+| `TELEGRAM_CHAT_ID` | Telegram chat/channel ID |
 
-	fmt.Println(res)
-}
+---
+
+## Key Contracts (Base Mainnet)
+
+| Contract | Address |
+|----------|---------|
+| Balancer Vault | `0xBA12222222228d8Ba445958a75a0704d566BF2C8` |
+| Uni V3 Router | `0x2626664c2603336E57B271c5C0b26F421741e481` |
+| PancakeSwap V3 Router | `0x1b81D678ffb9C0263b24A97847620C99d213eB14` |
+| cbETH | `0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22` |
+| Uni V3 Quoter V2 | `0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a` |
+
+---
+
+## Phase Status
+
+| Phase | Status |
+|-------|--------|
+| Phase 1: Architecture + audit | DONE — 46 files, 27 tests passing |
+| Phase 2: Deploy to VPS | READY — workflow at `.github/workflows/deploy-dryrun.yml` |
+| Phase 3: 72-hour dry run | NOT STARTED |
+| Phase 4: Report + live readiness | NOT STARTED — requires readiness score ≥ 70 |
+
+---
+
+## Structure
+
+```
+apex-unified/src/
+  core/           config, safety, runContext, logger, jsonlLogger, dedup, rpcHealth
+  signals/        cbETH, dexSpread, triangular, aerodrome, cexContext
+  scanners/       cbETH, apexPair, apexTriangular, aerodrome
+  execution/      dryRunExecutor, liveExecutor, gasForecaster, flashLoanPlanner, routePlanner
+  risk/           circuitBreaker, lossLimits, strategyKillSwitch, exposureLimits, networkMutex
+  research/       replayEngine, backtester, reportGenerator, parameterOptimizer
+  infrastructure/ telegramAlert
+  contracts/      ApexFlashLoan.sol
+  scripts/        dry-run.ts, generate-report.ts, replay.ts, deploy-contract.ts
+  __tests__/      27 tests
+
+dashboard/        Real-time Next.js trading UI (Supabase realtime — Phase 4)
+supabase/         Database migrations for dashboard
+deploy/           VPS setup, start, and update scripts
 ```
 
-## Contributors
+---
 
-[Thank you](https://github.com/easycb/easycb-go/graphs/contributors) for contributing to the EasyCb SDK!
+## Infrastructure
 
-## Contact US
-- Lark: Scan the QR code below with [Register Feishu](https://www.feishu.cn/en/) to join our CloudWeGo/eino user group.
+- **VPS:** Hetzner at `5.161.113.63` (Ubuntu 22.04)
+- **Chain:** Base L2 (chainId 8453), ~2s blocks
+- **RPC:** Alchemy WebSocket
+- **Logs:** `apex-unified/logs/` — JSONL files per strategy per day
+- **Process manager:** PM2 with `stop_exit_codes: [1]` (circuit breaker stops without restart loop)
 
-&ensp;&ensp;&ensp; <img src=".github/static/lark_group.jpg" alt="LarkGroup" width="200"/>
+---
 
-## License
+## Run Commands
 
-Released under the [MIT License](https://github.com/easycb/easycb-go/blob/master/LICENSE)
+```bash
+npm run dry-run              # build + start scanning (DRY_RUN enforced)
+npm run report               # generate 72-hour report from JSONL logs
+npm run replay 2024-01-15    # replay a specific date
+npm test                     # run 27 unit tests
+```
