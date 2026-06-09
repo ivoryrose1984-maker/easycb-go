@@ -10,13 +10,15 @@ import { logger } from '../core/logger';
 //
 // Source priority:
 //   1. cbETH contract exchangeRate() — only works on Ethereum L1; always fails on Base
-//   2. Chainlink cbETH/ETH Exchange Rate feed on Base (live, 24h heartbeat)
+//   2. Chainlink cbETH/USD ÷ ETH/USD → cbETH/ETH ratio (both 8-dec, 24h heartbeat)
 //   3. In-memory cache from last successful call (survives short Chainlink outages)
 //   4. Hardcoded constant — absolute last resort, logs ERROR, signal unreliable
 //
-// Chainlink address: https://docs.chain.link/data-feeds/price-feeds/addresses?network=base
-// cbETH/ETH Exchange Rate — Base mainnet: 0x806b4Ac04501c29769051e42783cF04dCE41440b
-const CHAINLINK_CBETH_ETH = '0x806b4Ac04501c29769051e42783cF04dCE41440b';
+// Base mainnet Chainlink feeds (verified):
+//   cbETH/USD: 0xd7818272B9e248357d13057AAb0B417aF31E817d
+//   ETH/USD:   0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70
+const CHAINLINK_CBETH_USD = '0xd7818272B9e248357d13057AAb0B417aF31E817d';
+const CHAINLINK_ETH_USD   = '0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70';
 
 const CHAINLINK_ABI = [
   'function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)',
@@ -43,45 +45,51 @@ export interface CbEthSignalResult {
 }
 
 class CbEthRateOracle {
-  private chainlink:  ethers.Contract;
+  private clCbEth:    ethers.Contract;
+  private clEth:      ethers.Contract;
   private cbethL1:    ethers.Contract;
   private cachedRate: bigint | null = null;
   private cachedAt    = 0;
 
   constructor(provider: ethers.Provider) {
-    this.chainlink = new ethers.Contract(CHAINLINK_CBETH_ETH, CHAINLINK_ABI, provider);
-    this.cbethL1   = new ethers.Contract(CONFIG.TOKENS.cbETH, CBETH_ABI, provider);
+    this.clCbEth = new ethers.Contract(CHAINLINK_CBETH_USD, CHAINLINK_ABI, provider);
+    this.clEth   = new ethers.Contract(CHAINLINK_ETH_USD,   CHAINLINK_ABI, provider);
+    this.cbethL1 = new ethers.Contract(CONFIG.TOKENS.cbETH, CBETH_ABI,     provider);
   }
 
   async getRate(): Promise<{ rate: bigint; source: string }> {
     // 1. L1 staking contract (always fails on Base, kept for future compat)
     try {
       const rate = await this.cbethL1.exchangeRate() as bigint;
-      if (rate > 1_000_000_000_000_000_000n) { // sanity: must be > 1.0e18
+      if (rate > 1_000_000_000_000_000_000n) {
         this.cachedRate = rate;
         this.cachedAt   = Date.now();
         return { rate, source: 'cbeth.exchangeRate()' };
       }
     } catch { /* expected on Base */ }
 
-    // 2. Chainlink cbETH/ETH Exchange Rate feed
+    // 2. Chainlink cbETH/USD ÷ ETH/USD → cbETH/ETH (both feeds are 8-dec)
+    //    cbETH/ETH (18-dec) = cbEthUsd * 1e18 / ethUsd
     try {
-      const [, answer, , updatedAt] = await this.chainlink.latestRoundData() as
-        [bigint, bigint, bigint, bigint, bigint];
-      const staleSecs = Math.floor(Date.now() / 1000) - Number(updatedAt);
-      const rate      = BigInt(answer);
+      const [[, cbEthUsd, , cbEthUpdated], [, ethUsd, , ethUpdated]] = await Promise.all([
+        this.clCbEth.latestRoundData() as Promise<[bigint, bigint, bigint, bigint, bigint]>,
+        this.clEth.latestRoundData()   as Promise<[bigint, bigint, bigint, bigint, bigint]>,
+      ]);
 
-      if (rate > 1_000_000_000_000_000_000n && staleSecs < STALE_RATE_SECS) {
+      const oldestUpdate = Math.min(Number(cbEthUpdated), Number(ethUpdated));
+      const staleSecs    = Math.floor(Date.now() / 1000) - oldestUpdate;
+
+      if (cbEthUsd > 0n && ethUsd > 0n && staleSecs < STALE_RATE_SECS) {
+        const rate = (BigInt(cbEthUsd) * 10n ** 18n) / BigInt(ethUsd);
         this.cachedRate = rate;
         this.cachedAt   = Date.now();
         return { rate, source: `chainlink (age=${Math.round(staleSecs / 3600)}h)` };
       }
 
-      if (rate > 0n) {
-        logger.warn('cbETH', `Chainlink rate stale (${Math.round(staleSecs / 3600)}h old) — falling back to cache`);
-        // Still update cache if stale but plausible — better than nothing
+      if (cbEthUsd > 0n && ethUsd > 0n) {
+        logger.warn('cbETH', `Chainlink rate stale (${Math.round(staleSecs / 3600)}h old) — using cache`);
         if (this.cachedRate === null) {
-          this.cachedRate = rate;
+          this.cachedRate = (BigInt(cbEthUsd) * 10n ** 18n) / BigInt(ethUsd);
           this.cachedAt   = Date.now();
         }
       }
