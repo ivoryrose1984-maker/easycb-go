@@ -6,15 +6,30 @@ import { Opportunity } from '../types/Opportunity';
 import { opportunityHash } from '../core/dedup';
 import { logger } from '../core/logger';
 
-// exchangeRate() exists on the Ethereum L1 staking contract but NOT on the Base
-// bridged ERC-20 token (0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22). We try it
-// anyway (works if Coinbase ever adds an oracle), then fall back to a cached estimate.
+// ── cbETH exchange-rate oracle ────────────────────────────────────────────────
+//
+// Source priority:
+//   1. cbETH contract exchangeRate() — only works on Ethereum L1; always fails on Base
+//   2. Chainlink cbETH/ETH Exchange Rate feed on Base (live, 24h heartbeat)
+//   3. In-memory cache from last successful call (survives short Chainlink outages)
+//   4. Hardcoded constant — absolute last resort, logs ERROR, signal unreliable
+//
+// Chainlink address: https://docs.chain.link/data-feeds/price-feeds/addresses?network=base
+// cbETH/ETH Exchange Rate — Base mainnet: 0x806b4Ac04501c29769051e42783cF04dCE41440b
+const CHAINLINK_CBETH_ETH = '0x806b4Ac04501c29769051e42783cF04dCE41440b';
+
+const CHAINLINK_ABI = [
+  'function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)',
+];
 const CBETH_ABI  = ['function exchangeRate() view returns (uint256)'];
-// ~1.065 ETH per cbETH — update this periodically until a live oracle is wired up
-const CBETH_FALLBACK_RATE = 1_065_000_000_000_000_000n; // 1.065e18
 const QUOTER_ABI = [
   'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
 ];
+
+// 25 hours — Chainlink cbETH/ETH heartbeat is 24h; we allow +1h grace
+const STALE_RATE_SECS  = 90_000;
+// Only used if Chainlink + cache both fail — logs ERROR every block it's used
+const CBETH_FALLBACK_RATE = 1_065_000_000_000_000_000n; // 1.065e18
 
 const PROBE_WETH = ethers.parseEther('3.33');
 const FEE_TIERS  = [500, 100, 3000] as const;
@@ -27,28 +42,85 @@ export interface CbEthSignalResult {
   window:       ReturnType<typeof getCompetitionWindow>;
 }
 
+class CbEthRateOracle {
+  private chainlink:  ethers.Contract;
+  private cbethL1:    ethers.Contract;
+  private cachedRate: bigint | null = null;
+  private cachedAt    = 0;
+
+  constructor(provider: ethers.Provider) {
+    this.chainlink = new ethers.Contract(CHAINLINK_CBETH_ETH, CHAINLINK_ABI, provider);
+    this.cbethL1   = new ethers.Contract(CONFIG.TOKENS.cbETH, CBETH_ABI, provider);
+  }
+
+  async getRate(): Promise<{ rate: bigint; source: string }> {
+    // 1. L1 staking contract (always fails on Base, kept for future compat)
+    try {
+      const rate = await this.cbethL1.exchangeRate() as bigint;
+      if (rate > 1_000_000_000_000_000_000n) { // sanity: must be > 1.0e18
+        this.cachedRate = rate;
+        this.cachedAt   = Date.now();
+        return { rate, source: 'cbeth.exchangeRate()' };
+      }
+    } catch { /* expected on Base */ }
+
+    // 2. Chainlink cbETH/ETH Exchange Rate feed
+    try {
+      const [, answer, , updatedAt] = await this.chainlink.latestRoundData() as
+        [bigint, bigint, bigint, bigint, bigint];
+      const staleSecs = Math.floor(Date.now() / 1000) - Number(updatedAt);
+      const rate      = BigInt(answer);
+
+      if (rate > 1_000_000_000_000_000_000n && staleSecs < STALE_RATE_SECS) {
+        this.cachedRate = rate;
+        this.cachedAt   = Date.now();
+        return { rate, source: `chainlink (age=${Math.round(staleSecs / 3600)}h)` };
+      }
+
+      if (rate > 0n) {
+        logger.warn('cbETH', `Chainlink rate stale (${Math.round(staleSecs / 3600)}h old) — falling back to cache`);
+        // Still update cache if stale but plausible — better than nothing
+        if (this.cachedRate === null) {
+          this.cachedRate = rate;
+          this.cachedAt   = Date.now();
+        }
+      }
+    } catch (err: any) {
+      logger.warn('cbETH', `Chainlink feed error: ${err.message}`);
+    }
+
+    // 3. In-memory cache from last successful call
+    if (this.cachedRate !== null) {
+      const ageMin = Math.round((Date.now() - this.cachedAt) / 60_000);
+      logger.warn('cbETH', `Using cached exchange rate (age=${ageMin}m)`);
+      return { rate: this.cachedRate, source: `cache (age=${ageMin}m)` };
+    }
+
+    // 4. Hardcoded constant — loud error, signal data is unreliable
+    logger.error('cbETH', 'All rate sources failed — using hardcoded fallback. cbETH signal is UNRELIABLE. Check Chainlink feed.');
+    return { rate: CBETH_FALLBACK_RATE, source: 'HARDCODED_FALLBACK' };
+  }
+}
+
 export class CbEthFairValueSignal {
-  private cbeth:  ethers.Contract;
+  private oracle: CbEthRateOracle;
   private quoter: ethers.Contract;
 
   constructor(provider: ethers.Provider) {
-    this.cbeth  = new ethers.Contract(CONFIG.TOKENS.cbETH, CBETH_ABI,  provider);
+    this.oracle = new CbEthRateOracle(provider);
     this.quoter = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER, QUOTER_ABI, provider);
   }
 
   async scan(provider: ethers.Provider, blockNumber: number): Promise<CbEthSignalResult | null> {
     const t0 = Date.now();
 
-    let exchangeRateRaw: bigint;
-    try {
-      exchangeRateRaw = await this.cbeth.exchangeRate() as bigint;
-    } catch {
-      // Base cbETH is a bridged ERC-20 without exchangeRate() — use fallback
-      logger.debug('cbETH', `exchangeRate() unavailable on Base — using fallback rate`);
-      exchangeRateRaw = CBETH_FALLBACK_RATE;
-    }
-
+    const { rate: exchangeRateRaw, source: rateSource } = await this.oracle.getRate();
     const fairWethPerCbEth = Number(exchangeRateRaw) / 1e18;
+
+    // Abort if using hardcoded fallback — don't log fake opportunities
+    if (rateSource === 'HARDCODED_FALLBACK') {
+      return null;
+    }
 
     let dexWethOut: bigint | null = null;
     let feeTierUsed = 0;
@@ -81,11 +153,10 @@ export class CbEthFairValueSignal {
     const window     = getCompetitionWindow();
     const threshold  = adjustedThreshold(CONFIG.MIN_NET_EDGE_BPS);
 
-    // Gas cost in ETH (conservative Base L2 estimate)
     const gasEth       = 0.0003;
     const probeSizeEth = Number(ethers.formatEther(PROBE_WETH));
     const gasAsBps     = (gasEth / probeSizeEth) * 10_000;
-    const totalCosts   = gasAsBps + 5 + (feeTierUsed / 100) + 10 + 5; // slippage+dexFee+safety+revert
+    const totalCosts   = gasAsBps + 5 + (feeTierUsed / 100) + 10 + 5;
     const netEdgeBps   = grossEdgeBps - totalCosts;
 
     const hash = opportunityHash({
@@ -108,7 +179,11 @@ export class CbEthFairValueSignal {
     const gasUsd         = 0.0003 * ethPriceUsd;
     const netProfitUsd   = parseFloat(Math.max(0, grossProfitUsd - gasUsd - grossProfitUsd * 0.0005).toFixed(4));
 
-    logger.debug('cbETH', `block=${blockNumber} gross=${grossEdgeBps.toFixed(2)}bps net=${netEdgeBps.toFixed(2)}bps grossUsd=$${grossProfitUsd.toFixed(2)} thresh=${threshold.toFixed(2)}bps latency=${rpcLatencyMs}ms`);
+    logger.debug('cbETH',
+      `block=${blockNumber} rate=${fairWethPerCbEth.toFixed(6)} source=${rateSource} ` +
+      `gross=${grossEdgeBps.toFixed(2)}bps net=${netEdgeBps.toFixed(2)}bps ` +
+      `grossUsd=$${grossProfitUsd.toFixed(2)} thresh=${threshold.toFixed(2)}bps latency=${rpcLatencyMs}ms`
+    );
 
     const opp: Opportunity = {
       timestamp:        new Date().toISOString(),
