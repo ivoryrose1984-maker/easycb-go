@@ -7,6 +7,15 @@ let chatId:     string | null      = null;
 let lastSentMs = 0;
 const COOLDOWN = 60_000;
 
+// HTML mode is used for all messages — escape &, <, > so dynamic values
+// (token symbols, strategy IDs, dollar amounts) can never break parsing.
+function esc(s: unknown): string {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 export async function initTelegram(): Promise<void> {
   if (!CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) {
     logger.warn('TG', 'No credentials — alerts disabled');
@@ -27,14 +36,13 @@ export function sendAlert(text: string): void {
   if (!bot || !chatId) return;
   if (Date.now() - lastSentMs < COOLDOWN) return;
   lastSentMs = Date.now();
-  bot.sendMessage(chatId, `🤖 *ApexUnified*\n\n${text}`, { parse_mode: 'Markdown' })
+  bot.sendMessage(chatId, `🤖 <b>ApexUnified</b>\n\n${esc(text)}`, { parse_mode: 'HTML' })
      .catch(err => logger.error('TG', `Send failed: ${err}`));
 }
 
 function sendPriority(text: string): void {
   if (!bot || !chatId) return;
-  // Safety-critical alerts bypass the cooldown
-  bot.sendMessage(chatId, `🚨 *ApexUnified*\n\n${text}`, { parse_mode: 'Markdown' })
+  bot.sendMessage(chatId, `🚨 <b>ApexUnified</b>\n\n${esc(text)}`, { parse_mode: 'HTML' })
      .catch(err => logger.error('TG', `Priority send failed: ${err}`));
 }
 
@@ -45,7 +53,7 @@ export function alertOpportunity(strategyId: string, bps: number, blockNum: numb
 export function alertCircuitBreaker(msg: string): Promise<void> {
   if (!bot || !chatId) return Promise.resolve();
   return bot
-    .sendMessage(chatId, `🚨 *ApexUnified*\n\nCIRCUIT BREAKER\n${msg}`, { parse_mode: 'Markdown' })
+    .sendMessage(chatId, `🚨 <b>ApexUnified</b>\n\nCIRCUIT BREAKER\n${esc(msg)}`, { parse_mode: 'HTML' })
     .then(() => {})
     .catch(err => { logger.error('TG', `Circuit breaker alert failed: ${err}`); });
 }

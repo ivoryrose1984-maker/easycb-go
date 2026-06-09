@@ -43,6 +43,49 @@ let handlerActive  = false;
 let lastBlockMs    = Date.now();
 let reconnecting   = false;
 
+// ── Fallback RPC (set FALLBACK_RPC_URL in .env to enable) ────────────────────
+const PRIMARY_URL  = CONFIG.ALCHEMY_WSS_URL;
+const FALLBACK_URL = process.env.FALLBACK_RPC_URL ?? '';
+
+// Switch to fallback after 3 failures within 60 s; retry primary after 5 min
+const FAILURE_WINDOW_MS   = 60_000;
+const FAILURE_THRESHOLD   = 3;
+const FALLBACK_RECOVER_MS = 300_000;
+
+let wsFailureTimes: number[] = [];
+let usingFallback  = false;
+let fallbackSince  = 0;
+
+function recordWsFailure(): void {
+  const now = Date.now();
+  wsFailureTimes = wsFailureTimes.filter(t => now - t < FAILURE_WINDOW_MS);
+  wsFailureTimes.push(now);
+}
+
+function activeRpcUrl(): string {
+  if (!FALLBACK_URL) return PRIMARY_URL;
+
+  if (usingFallback) {
+    if (Date.now() - fallbackSince > FALLBACK_RECOVER_MS) {
+      logger.info('MAIN', 'Attempting to restore primary RPC...');
+      usingFallback = false;
+      wsFailureTimes = [];
+    } else {
+      return FALLBACK_URL;
+    }
+  }
+
+  if (wsFailureTimes.length >= FAILURE_THRESHOLD) {
+    usingFallback = true;
+    fallbackSince = Date.now();
+    logger.warn('MAIN', `${FAILURE_THRESHOLD} WS failures in ${FAILURE_WINDOW_MS / 1000}s — switching to fallback RPC`);
+    sendAlert('Switched to fallback RPC — primary throttled');
+    return FALLBACK_URL;
+  }
+
+  return PRIMARY_URL;
+}
+
 const QUOTER_ABI = [
   'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
 ];
@@ -140,10 +183,12 @@ function registerHandlers(ctx: BotContext): void {
 async function reconnect(): Promise<void> {
   if (reconnecting) return;
   reconnecting = true;
-  logger.warn('MAIN', 'Reconnecting WebSocket to Base...');
+  recordWsFailure();
+  const url = activeRpcUrl();
+  logger.warn('MAIN', `Reconnecting WebSocket (${usingFallback ? 'FALLBACK' : 'primary'})...`);
   try {
     try { await currentProvider.destroy(); } catch { /* ignore */ }
-    currentProvider = await createWsProvider(CONFIG.ALCHEMY_WSS_URL);
+    currentProvider = await createWsProvider(url, () => { reconnect().catch(() => {}); });
     const ctx = buildContext(currentProvider);
     registerHandlers(ctx);
     lastBlockMs = Date.now();
@@ -152,7 +197,6 @@ async function reconnect(): Promise<void> {
   } catch (err: any) {
     logger.error('MAIN', `Reconnect failed: ${err.message} — will retry in 30s`);
     alertError(`Reconnect failed: ${err.message}`);
-    // Reset so heartbeat can trigger another attempt
     lastBlockMs = Date.now() - 25_000;
   } finally {
     reconnecting = false;
@@ -192,7 +236,7 @@ async function main(): Promise<void> {
   }
 
   logger.info('MAIN', 'Connecting to Base via WebSocket...');
-  currentProvider = await createWsProvider(CONFIG.ALCHEMY_WSS_URL);
+  currentProvider = await createWsProvider(PRIMARY_URL, () => { reconnect().catch(() => {}); });
   logger.info('MAIN', 'Connected');
 
   const ctx = buildContext(currentProvider);
