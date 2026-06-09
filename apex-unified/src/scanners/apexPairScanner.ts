@@ -20,6 +20,8 @@ const PAIRS = [
   { tokenIn: CONFIG.TOKENS.WETH,  tokenOut: CONFIG.TOKENS.cbBTC, name: 'WETH/cbBTC' },
   { tokenIn: CONFIG.TOKENS.USDbC, tokenOut: CONFIG.TOKENS.WETH,  name: 'USDbC/WETH' },
   { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.USDbC, name: 'USDC/USDbC' },
+  { tokenIn: CONFIG.TOKENS.WETH,  tokenOut: CONFIG.TOKENS.AERO,  name: 'WETH/AERO'  },
+  { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.AERO,  name: 'USDC/AERO'  },
 ];
 
 export class ApexPairScanner {
@@ -37,11 +39,13 @@ export class ApexPairScanner {
       return { strategyId, scanned: 0, opportunities: [], errors: 0, durationMs: 0 };
     }
 
-    // USDC/USDT/DAI/USDbC pairs use 6-decimal probe; WETH tokenIn pairs use 18-decimal probe
-    const WETH_18_PROBE = ethers.parseEther('3');
+    // USDC/USDT/DAI/USDbC pairs: 5000 USDC probe for realistic signal resolution
+    // WETH tokenIn pairs: 3 ETH probe (~same order of magnitude)
+    const WETH_18_PROBE  = ethers.parseEther('3');
+    const USDC_PROBE     = 5_000n * 1_000_000n;
     const results = await Promise.allSettled(
       PAIRS.map(pair => {
-        const probe = pair.tokenIn === CONFIG.TOKENS.WETH ? WETH_18_PROBE : CONFIG.MIN_LOAN_USDC;
+        const probe = pair.tokenIn === CONFIG.TOKENS.WETH ? WETH_18_PROBE : USDC_PROBE;
         return this.signal.scan(pair, probe, blockNumber, ethPriceUsd);
       })
     );
@@ -52,7 +56,7 @@ export class ApexPairScanner {
     for (const r of results) {
       if (r.status === 'rejected') { errors++; continue; }
       const res = r.value;
-      if (!res) { errors++; continue; }
+      if (!res) continue;
 
       logSignal(strategyId, {
         blockNumber,

@@ -22,7 +22,7 @@ export class ApexTriangularScanner {
       return { strategyId, scanned: 0, opportunities: [], errors: 0, durationMs: 0 };
     }
 
-    const results = await this.signal.scan(CONFIG.MIN_LOAN_USDC, blockNumber, ethPriceUsd);
+    const results = await this.signal.scan(5_000n * 1_000_000n, blockNumber, ethPriceUsd);
 
     // Log every path individually — sub-threshold included — so bps distribution
     // is captured for MIN_NET_EDGE_BPS tuning during the dry run.

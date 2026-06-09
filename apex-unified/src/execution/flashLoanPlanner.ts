@@ -20,12 +20,16 @@ export function calculateNetProfit(
   buyQuote:    bigint,
   sellQuote:   bigint,
   gasForecast: GasForecast,
-  ethPriceUsd: bigint
+  ethPriceUsd: bigint,
+  isWethInput  = false,
 ): ProfitResult {
   const grossProfit = sellQuote - amountIn;
   const gasCostWei  = CONFIG.GAS_ESTIMATE *
     (gasForecast.predictedBaseFee + CONFIG.MIN_PRIORITY_FEE_GWEI * 1_000_000_000n);
-  const gasCostUsdc = (gasCostWei * ethPriceUsd) / 10n ** 18n;
+  // Match gas cost denomination to amountIn: WEI for WETH inputs, 6-dec USDC otherwise
+  const gasCostInInputUnits = isWethInput
+    ? gasCostWei
+    : (gasCostWei * ethPriceUsd) / 10n ** 18n;
 
   const priorityPct     = BigInt(gasForecast.dynamicPriorityPct);
   const priorityBudget  = grossProfit > 0n ? (grossProfit * priorityPct) / 100n : 0n;
@@ -33,10 +37,10 @@ export function calculateNetProfit(
   const latencyCost  = amountIn > 0n ? (amountIn * BigInt(CONFIG.LATENCY_BUFFER_BPS))  / 10_000n : 0n;
   const failureCost  = amountIn > 0n ? (amountIn * BigInt(CONFIG.FAILURE_BUFFER_BPS))  / 10_000n : 0n;
 
-  const netProfit = grossProfit - gasCostUsdc - priorityBudget - latencyCost - failureCost;
+  const netProfit = grossProfit - gasCostInInputUnits - priorityBudget - latencyCost - failureCost;
   const score     = amountIn > 0n ? Number((netProfit * 10_000n) / amountIn) : 0;
 
-  const shouldExecute = netProfit > 0n && score >= CONFIG.MIN_PROFIT_BPS && grossProfit > gasCostUsdc;
+  const shouldExecute = netProfit > 0n && score >= CONFIG.MIN_PROFIT_BPS && grossProfit > gasCostInInputUnits;
 
   const priorityWei    = ethPriceUsd > 0n ? (priorityBudget * 10n ** 18n) / ethPriceUsd : gweiToWei(CONFIG.MIN_PRIORITY_FEE_GWEI);
   const priorityPerGas = CONFIG.GAS_ESTIMATE > 0n ? priorityWei / CONFIG.GAS_ESTIMATE : 0n;
@@ -60,6 +64,7 @@ export function buildExecutionPlan(
 ): ExecutionPlan {
   const loanAmount   = BigInt(opp.quotedInput);
   const minAmountOut = sellQuote * 995n / 1000n;  // 0.5% slippage protection
+  const isWethInput  = opp.tokenIn.toLowerCase() === CONFIG.TOKENS.WETH.toLowerCase();
 
   const route = encode2HopPath(
     opp.tokenIn,  feeBuy,
@@ -67,8 +72,14 @@ export function buildExecutionPlan(
     opp.tokenIn,  // round-trip: repay same token as loan
   );
 
-  const profit = calculateNetProfit(loanAmount, loanAmount, sellQuote, gasForecast, ethPriceUsd);
+  const profit = calculateNetProfit(loanAmount, loanAmount, sellQuote, gasForecast, ethPriceUsd, isWethInput);
   const maxFeePerGas = gasForecast.predictedBaseFee * CONFIG.BASE_FEE_MULTIPLIER + profit.priorityFeePerGas;
+
+  const estimatedProfitUsd = profit.netProfit > 0n
+    ? isWethInput
+      ? Number(profit.netProfit) / 1e18 * (Number(ethPriceUsd) / 1e6)
+      : Number(profit.netProfit) / 1e6
+    : 0;
 
   return {
     opportunity:          opp,
@@ -82,7 +93,7 @@ export function buildExecutionPlan(
     maxPriorityFeePerGas: profit.priorityFeePerGas.toString(),
     targetBlock:          opp.blockNumber + 1,
     builderUrls:          CONFIG.BUILDERS.filter(b => b.enabled).map(b => b.url),
-    estimatedProfitUsd:   profit.netProfit > 0n ? Number(profit.netProfit) / 1e6 : 0,
+    estimatedProfitUsd,
   };
 }
 
