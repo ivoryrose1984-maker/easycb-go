@@ -29,6 +29,21 @@ export async function executeLive(
   );
 
   try {
+    // Simulate first — abort if the call would revert, saving gas
+    try {
+      await contract.executeArbitrage.staticCall(
+        plan.loanToken,
+        BigInt(plan.loanAmount),
+        plan.routerAddress,
+        plan.route,
+        BigInt(plan.minAmountOut),
+        { from: wallet.address }
+      );
+    } catch (simErr: any) {
+      logger.warn('LIVE', `Simulation reverted — skipping broadcast: ${simErr.message}`);
+      return { success: false, txHash: null, builder: 'none', error: `simulation reverted: ${simErr.message}` };
+    }
+
     const tx = await contract.executeArbitrage.populateTransaction(
       plan.loanToken,
       BigInt(plan.loanAmount),

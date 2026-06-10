@@ -9,8 +9,11 @@ const ALL_STRATEGIES: StrategyId[] = [
   'apex.dex_spread', 'apex.triangular', 'grok.cbeth_fair_value', 'apex.aerodrome_spread',
 ];
 
-let triggered      = false;
+const GRACE_BLOCKS = 3;
+
+let triggered           = false;
 let initialBalance: bigint | null = null;
+let consecutiveBreaches = 0;
 
 export function isCircuitBroken(): boolean {
   return triggered;
@@ -26,16 +29,32 @@ export async function checkCircuitBreaker(provider: ethers.Provider, address: st
 
   try {
     const current = await provider.getBalance(address);
-    if (current >= initialBalance) return;
+    if (current >= initialBalance) {
+      if (consecutiveBreaches > 0) {
+        logger.info('CIRCUIT', `Drawdown recovered — resetting grace counter`);
+        consecutiveBreaches = 0;
+      }
+      return;
+    }
 
     const drawdownPct = Number((initialBalance - current) * 10_000n / initialBalance) / 100;
     if (drawdownPct >= CONFIG.DRAWDOWN_THRESHOLD) {
+      consecutiveBreaches++;
+      if (consecutiveBreaches < GRACE_BLOCKS) {
+        logger.warn('CIRCUIT', `Drawdown ${drawdownPct.toFixed(1)}% — grace ${consecutiveBreaches}/${GRACE_BLOCKS}`);
+        return;
+      }
       triggered = true;
-      const msg = `Circuit breaker: ${drawdownPct.toFixed(1)}% drawdown — halting all execution`;
+      const msg = `Circuit breaker: ${drawdownPct.toFixed(1)}% drawdown (${GRACE_BLOCKS} consecutive blocks) — halting all execution`;
       logger.error('CIRCUIT', msg);
       for (const id of ALL_STRATEGIES) killStrategy(id, 'circuit breaker triggered');
       await alertCircuitBreaker(msg);
       process.exit(1);
+    } else {
+      if (consecutiveBreaches > 0) {
+        logger.info('CIRCUIT', `Drawdown recovered — resetting grace counter`);
+        consecutiveBreaches = 0;
+      }
     }
   } catch (err: any) {
     logger.error('CIRCUIT', `Check failed: ${err.message}`);
@@ -43,6 +62,7 @@ export async function checkCircuitBreaker(provider: ethers.Provider, address: st
 }
 
 export function resetCircuitBreaker(): void {
-  triggered      = false;
-  initialBalance = null;
+  triggered           = false;
+  initialBalance      = null;
+  consecutiveBreaches = 0;
 }
