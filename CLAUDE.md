@@ -114,12 +114,12 @@ npm run replay 2024-01-15   # replay a specific date
 
 | Phase | Status |
 |---|---|
-| Phase 1: Architecture + code | DONE — 46 files, TypeScript clean, 27 tests passing, full audit resolved |
-| Phase 2: Deploy to VPS | READY — workflow at `.github/workflows/deploy-dryrun.yml`, branch `claude/new-session-ao4nr`, 4 secrets needed |
-| Phase 3: 72-hour dry run | NOT STARTED — starts after deploy |
-| Phase 4: Report + live readiness | NOT STARTED — after Phase 3 |
+| Phase 1: Architecture + code | DONE — TypeScript clean, 27 tests passing, two audit rounds resolved |
+| Phase 2: Deploy to VPS | DONE — bot live on Hetzner via PM2, Alchemy paid plan, Chainlink cbETH rate confirmed (`source=chainlink`) |
+| Phase 3: 72-hour dry run | IN PROGRESS — clean run started 2026-06-10 ~12:15 UTC after Alchemy 429 fix; prior data (Jun 8–9) partially contaminated by hardcoded cbETH rate + repeated WS crashes |
+| Phase 4: Report + live readiness | NOT STARTED — needs 48h+ clean data through US/EU market-open windows |
 
-Live execution requires: Phase 3 complete + readiness score ≥70 + rotate all credentials first.
+Live execution requires: Phase 3 complete + readiness score ≥70 + rotate all credentials + deploy ApexFlashLoan.sol + fresh funded wallet (~0.05 ETH on Base).
 
 ### Resolved audit issues (Phase 1)
 All of the following were identified and fixed before dry run:
@@ -135,6 +135,20 @@ All of the following were identified and fixed before dry run:
 10. CI tested only legacy modules — added `build-apex-unified` and `compile-contracts` jobs
 11. Triangular `netProfitUsd` used hardcoded $0.90 gas — now dynamic via `ethPriceUsd`
 12. Deploy workflow missing `ENABLE_AERODROME_SIGNAL=true` and wrong JSONL pattern — both fixed
+
+### Resolved production issues (Phase 2/3, June 2026)
+13. cbETH used hardcoded 1.065 rate (Chainlink cbETH/ETH feed doesn't exist on Base) — now derives rate from Chainlink cbETH/USD (`0xd7818272B9e248357d13057AAb0B417aF31E817d`) ÷ ETH/USD (`0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70`); returns null (no fake opps) if all sources fail. The 1,392 cbETH "opportunities" from night 1 were artifacts of the hardcoded rate — discard that data
+14. WS `RangeError: Invalid WebSocket frame` + `429` crash loop (Alchemy free-tier throttle) — `ws.on('error'/'close')` handlers in `rpcHealth.ts` trigger immediate reconnect; 3-failures-in-60s switches to `FALLBACK_RPC_URL`; root cause resolved by Alchemy paid plan
+15. Telegram `can't parse entities` (underscores in strategy IDs broke Markdown) — switched to HTML parse_mode with `esc()` helper
+16. Circuit breaker halted on a single balance read — now requires 3 consecutive breaches (`GRACE_BLOCKS=3`), counter resets on recovery
+17. `liveExecutor.ts` broadcast without simulating — now `executeArbitrage.staticCall()` before signing; reverts are caught pre-broadcast, no gas spent
+18. WS keepalive `setInterval` leaked on every reconnect (pinging dead sockets, accumulating timers) — now cleared via `ws.on('close')`; reconnect trigger also debounced so error+close can't double-fire
+19. Daily loss counter reset on local-time midnight — now resets on UTC day boundary (matches chain time and JSONL logs)
+
+### Known data caveats
+- `apex.aerodrome_spread`: 0 profitable out of 10,775 scans (Jun 8–9) — disabled on VPS (`ENABLE_AERODROME_SIGNAL=false`) pending investigation
+- Persistent DAI/WETH 178bps spread repeating across consecutive blocks is suspect: real arbs vanish in 1–2 blocks; a spread that persists usually means thin liquidity the quote can't actually fill at size. Treat repeated same-route signals as ONE opportunity, not thousands, when estimating revenue
+- VPS `.env` had `APEX_FLASH_LOAN_ADDRESS` (wrong name; code reads `APEX_FLASH_LOAN_BASE`)
 
 ---
 

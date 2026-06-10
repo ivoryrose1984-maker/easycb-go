@@ -21,14 +21,20 @@ export async function createWsProvider(
       const ws = (provider as any).websocket;
       if (ws) {
         if (ws.ping) {
-          setInterval(() => {
+          // Keepalive must die with this socket — otherwise every reconnect
+          // leaks another interval pinging a dead connection.
+          const keepalive = setInterval(() => {
             try { ws.ping?.(); } catch { /* ignore */ }
           }, WSS_KEEPALIVE_MS);
+          ws.on('close', () => clearInterval(keepalive));
         }
 
         // Fire reconnect immediately on WS-level error or close rather than
         // waiting up to 30s for the heartbeat to notice silence.
+        let fired = false;
         const trigger = () => {
+          if (fired) return;
+          fired = true;
           try { onUnexpectedClose?.(); } catch { /* ignore */ }
         };
         ws.on('error', (err: Error) => {

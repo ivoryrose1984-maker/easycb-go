@@ -1,11 +1,16 @@
 import CONFIG from '../core/config';
 import { logger } from '../core/logger';
 
+// UTC day boundary — chain time and JSONL logs are UTC, so the loss window must be too
+function utcDay(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 let dailyLossUsd = 0;
-let lastResetDay = new Date().toDateString();
+let lastResetDay = utcDay();
 
 function checkReset(): void {
-  const today = new Date().toDateString();
+  const today = utcDay();
   if (today !== lastResetDay) {
     dailyLossUsd  = 0;
     lastResetDay  = today;
