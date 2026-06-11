@@ -44,7 +44,7 @@ export class ApexTriangularScanner {
     const accepted = [];
     for (const r of results) {
       if (!r.opportunity) continue;
-      if (!isNewOpportunity(r.opportunity.opportunityHash)) continue;
+      if (!isNewOpportunity(r.opportunity.opportunityHash, blockNumber)) continue;
       executeDryRun(r.opportunity);
       accepted.push(r.opportunity);
     }

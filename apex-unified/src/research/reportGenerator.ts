@@ -72,8 +72,8 @@ function liveReadinessScore(stats: StrategyStats[]): { score: number; blockers: 
   if (!CONFIG.CONTRACTS.APEX_FLASH_LOAN.startsWith('0x000')) score += 15;
   else blockers.push('Flash loan contract not deployed');
 
-  if (process.env.PRIVATE_KEY) score += 10;
-  else blockers.push('PRIVATE_KEY not set — required for live signing');
+  if (process.env.WALLET_PRIVATE_KEY) score += 10;
+  else blockers.push('WALLET_PRIVATE_KEY not set — required for live signing');
 
   if (CONFIG.ENABLE_BUILDER_SUBMISSION) score += 5;
   else blockers.push('ENABLE_BUILDER_SUBMISSION=false — enable for live execution');

@@ -74,7 +74,7 @@ export class ApexPairScanner {
         continue;
       }
 
-      if (!isNewOpportunity(res.opportunity.opportunityHash)) continue;
+      if (!isNewOpportunity(res.opportunity.opportunityHash, blockNumber)) continue;
 
       executeDryRun(res.opportunity);
       opportunities.push(res.opportunity);

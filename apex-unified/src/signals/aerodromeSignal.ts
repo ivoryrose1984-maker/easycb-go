@@ -102,7 +102,6 @@ export class AerodromeSignal {
 
       const hash = opportunityHash({
         chainId:      CONFIG.CHAIN_ID,
-        blockNumber,
         strategyId:   'apex.aerodrome_spread',
         feeTier:      0,
         tokenIn:      pair.tokenIn,

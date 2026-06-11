@@ -6,7 +6,6 @@ import { adjustedThreshold }                            from '../core/clock';
 
 const BASE_FIELDS = {
   chainId:      8453,
-  blockNumber:  1,
   strategyId:   'apex.dex_spread',
   feeTier:      500,
   tokenIn:      '0xAAAA',
@@ -27,7 +26,7 @@ describe('opportunityHash', () => {
 
   it('differs when any field changes', () => {
     const h1 = opportunityHash(BASE_FIELDS);
-    const h2 = opportunityHash({ ...BASE_FIELDS, blockNumber: 2 });
+    const h2 = opportunityHash({ ...BASE_FIELDS, feeTier: 3000 });
     expect(h1).not.toBe(h2);
   });
 
@@ -42,18 +41,28 @@ describe('isNewOpportunity', () => {
   beforeEach(() => clearDedup());
 
   it('returns true for a new hash', () => {
-    expect(isNewOpportunity('abc123')).toBe(true);
+    expect(isNewOpportunity('abc123', 100)).toBe(true);
   });
 
-  it('returns false for a seen hash', () => {
-    isNewOpportunity('abc123');
-    expect(isNewOpportunity('abc123')).toBe(false);
+  it('returns false for the same hash in the next block (within TTL)', () => {
+    isNewOpportunity('abc123', 100);
+    expect(isNewOpportunity('abc123', 101)).toBe(false);
+  });
+
+  it('returns false for same hash 2 blocks later (still within TTL=3)', () => {
+    isNewOpportunity('abc123', 100);
+    expect(isNewOpportunity('abc123', 102)).toBe(false);
+  });
+
+  it('returns true again once TTL expires (block gap >= 3)', () => {
+    isNewOpportunity('abc123', 100);
+    expect(isNewOpportunity('abc123', 103)).toBe(true);
   });
 
   it('returns true again after clear', () => {
-    isNewOpportunity('abc123');
+    isNewOpportunity('abc123', 100);
     clearDedup();
-    expect(isNewOpportunity('abc123')).toBe(true);
+    expect(isNewOpportunity('abc123', 101)).toBe(true);
   });
 });
 

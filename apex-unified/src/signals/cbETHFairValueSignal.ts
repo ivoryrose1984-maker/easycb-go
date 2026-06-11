@@ -169,7 +169,6 @@ export class CbEthFairValueSignal {
 
     const hash = opportunityHash({
       chainId:      CONFIG.CHAIN_ID,
-      blockNumber,
       strategyId:   'grok.cbeth_fair_value',
       feeTier:      feeTierUsed,
       tokenIn:      CONFIG.TOKENS.cbETH,

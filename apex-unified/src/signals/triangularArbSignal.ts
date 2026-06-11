@@ -118,7 +118,6 @@ export class TriangularArbSignal {
       const route = `USDC→${tokens[1].slice(0, 8)}…→${tokens[2].slice(0, 8)}…→USDC`;
       const hash  = opportunityHash({
         chainId:      CONFIG.CHAIN_ID,
-        blockNumber,
         strategyId:   'apex.triangular',
         feeTier:      fees[0],
         tokenIn:      tokens[0],

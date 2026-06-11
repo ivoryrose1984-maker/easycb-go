@@ -23,14 +23,14 @@ apex-unified/src/
   core/        config, safety, runContext, logger, jsonlLogger, dedup, clock, rpcHealth
   signals/     cbETHFairValueSignal, dexSpreadSignal, triangularArbSignal, aerodromeSignal, cexContextSignal
   scanners/    cbETHFairValueScanner, apexPairScanner, apexTriangularScanner, aerodromeScanner
-  execution/   dryRunExecutor, liveExecutor, gasForecaster, flashLoanPlanner, routePlanner, bundlePlanner
+  execution/   dryRunExecutor, liveExecutor, gasForecaster, flashLoanPlanner, routePlanner, bundlePlanner, FastPathExecutor
   risk/        circuitBreaker, lossLimits, strategyKillSwitch, exposureLimits, networkMutex
   research/    replayEngine, backtester, opportunityScorer, reportGenerator, parameterOptimizer
   infrastructure/ telegramAlert, ResilientWsProvider
   contracts/   ApexFlashLoan.sol
   types/       Opportunity, StrategyResult, ExecutionPlan, RiskDecision, RunReport
   scripts/     dry-run.ts, generate-report.ts, replay.ts, deploy-contract.ts
-  __tests__/   setup.ts, core.test.ts, math.test.ts, safety.test.ts  (27 tests)
+  __tests__/   setup.ts, core.test.ts, math.test.ts, safety.test.ts, risk.test.ts  (42 tests)
 ```
 
 ### Strategy IDs
@@ -114,9 +114,9 @@ npm run replay 2024-01-15   # replay a specific date
 
 | Phase | Status |
 |---|---|
-| Phase 1: Architecture + code | DONE — TypeScript clean, 27 tests passing, two audit rounds resolved |
+| Phase 1: Architecture + code | DONE — TypeScript clean, 42 tests passing, three audit rounds resolved |
 | Phase 2: Deploy to VPS | DONE — bot live on Hetzner via PM2, Alchemy paid plan, Chainlink cbETH rate confirmed (`source=chainlink`) |
-| Phase 3: 72-hour dry run | IN PROGRESS — clean run started 2026-06-10 ~12:15 UTC after Alchemy 429 fix; prior data (Jun 8–9) partially contaminated by hardcoded cbETH rate + repeated WS crashes |
+| Phase 3: 72-hour dry run | IN PROGRESS — ResilientWsProvider deployed 2026-06-11; zombie-socket crash loop eliminated; clean data accumulating |
 | Phase 4: Report + live readiness | NOT STARTED — needs 48h+ clean data through US/EU market-open windows |
 
 Live execution requires: Phase 3 complete + readiness score ≥70 + rotate all credentials + deploy ApexFlashLoan.sol + fresh funded wallet (~0.05 ETH on Base).
@@ -144,7 +144,10 @@ All of the following were identified and fixed before dry run:
 17. `liveExecutor.ts` broadcast without simulating — now `executeArbitrage.staticCall()` before signing; reverts are caught pre-broadcast, no gas spent
 18. WS keepalive `setInterval` leaked on every reconnect (pinging dead sockets, accumulating timers) — now cleared via `ws.on('close')`; reconnect trigger also debounced so error+close can't double-fire
 19. Daily loss counter reset on local-time midnight — now resets on UTC day boundary (matches chain time and JSONL logs)
-20. Manual reconnect loop replaced with `ResilientWsProvider` (`infrastructure/ResilientWsProvider.ts`): exponential backoff with full jitter (1s→60s), 10s floor on 429s, 30s block-silence watchdog (catches zombie sockets PM2 can't see), listener replay across reconnects, `onConnect()` hook rebuilds scanner context, `process.exit(1)` only after 20 consecutive failures. Log prefix: `[RWS]`
+20. Manual reconnect loop replaced with `ResilientWsProvider` (`infrastructure/ResilientWsProvider.ts`): exponential backoff with full jitter (1s→60s), 10s floor on 429s, 30s block-silence watchdog (catches zombie sockets PM2 can't see), listener replay across reconnects, `onConnect()` hook rebuilds scanner context (fresh provider refs after every reconnect), `process.exit(1)` only after 20 consecutive failures. Log prefix: `[RWS]`
+21. `FastPathExecutor` (`execution/FastPathExecutor.ts`): collapses 300–500ms live hot path to ~50ms — local calldata encoding, in-memory nonce, per-block fee cache (wired via `onBlock`), 15%-of-profit priority bid, dual broadcast via `Promise.any([alchemy, sequencer])`. Dry-run gate fires before signing so no wallet key needed in dry run.
+22. Dedup hash no longer includes `blockNumber` — same route+quotes in consecutive blocks = persistent spread (thin liquidity), now suppressed for 3 blocks (ROUTE_TTL_BLOCKS=3) instead of counted as N independent opportunities. Fixes inflated signal counts (DAI/WETH 178bps was counting once per block).
+23. `PRIVATE_KEY` → `WALLET_PRIVATE_KEY` in `reportGenerator.ts` readiness scorer — was always blocking the readiness score even when the key was set.
 
 ### Known data caveats
 - `apex.aerodrome_spread`: 0 profitable out of 10,775 scans (Jun 8–9) — disabled on VPS (`ENABLE_AERODROME_SIGNAL=false`) pending investigation

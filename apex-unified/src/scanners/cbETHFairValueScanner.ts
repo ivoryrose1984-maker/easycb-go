@@ -50,7 +50,7 @@ export class CbEthFairValueScanner {
       return { strategyId, scanned: 1, opportunities: [], errors: 0, durationMs };
     }
 
-    if (!isNewOpportunity(result.opportunity.opportunityHash)) {
+    if (!isNewOpportunity(result.opportunity.opportunityHash, blockNumber)) {
       logger.debug('cbETH', `Duplicate opp ${result.opportunity.opportunityHash} — skipped`);
       return { strategyId, scanned: 1, opportunities: [], errors: 0, durationMs };
     }

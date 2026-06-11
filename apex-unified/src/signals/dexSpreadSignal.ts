@@ -108,7 +108,6 @@ export class DexSpreadSignal {
 
       const hash = opportunityHash({
         chainId:      CONFIG.CHAIN_ID,
-        blockNumber,
         strategyId:   'apex.dex_spread',
         feeTier:      bestBuy.fee,
         tokenIn:      pair.tokenIn,
