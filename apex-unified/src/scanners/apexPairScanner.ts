@@ -70,7 +70,7 @@ export class ApexPairScanner {
       });
 
       if (!res.opportunity) {
-        logRejection({ strategyId, blockNumber, pair: res.pair, reason: `spread=${res.spreadBps}bps below threshold` });
+        // rejectionReason already logged by DexSpreadSignal; skip double-logging here
         continue;
       }
 

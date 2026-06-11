@@ -51,6 +51,10 @@ export const CONFIG = {
   MIN_NET_EDGE_BPS:      parseInt(optional('MIN_NET_EDGE_BPS',       '5'),     10),
   CEX_TRIGGER_BPS:       parseInt(optional('CEX_TRIGGER_BPS',        '15'),    10),
 
+  // Liquidity filter — reject thin pools before counting as opportunities
+  LIQUIDITY_CHECK_SCALE:    parseInt(optional('LIQUIDITY_CHECK_SCALE',    '10'),   10),
+  LIQUIDITY_MAX_IMPACT_BPS: parseInt(optional('LIQUIDITY_MAX_IMPACT_BPS', '5000'), 10),
+
   // Chain addresses — Base mainnet
   TOKENS: {
     WETH:  '0x4200000000000000000000000000000000000006',

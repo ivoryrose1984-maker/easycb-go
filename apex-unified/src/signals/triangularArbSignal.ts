@@ -69,19 +69,21 @@ export class TriangularArbSignal {
   }
 
   async scan(amountIn: bigint, blockNumber: number, ethPriceUsd: bigint = 3_000_000_000n): Promise<TriangularResult[]> {
-    const results = await Promise.allSettled(
+    const settled = await Promise.allSettled(
       CANDIDATES.map(c => this.simulate(c.tokens, c.fees, amountIn, blockNumber, ethPriceUsd))
     );
 
-    const opportunities: TriangularResult[] = [];
-    for (const r of results) {
-      if (r.status === 'fulfilled' && r.value) {
-        opportunities.push(r.value);
+    // Collect ALL paths (including sub-threshold) so callers can report accurate scan counts.
+    // Paths that error get a null entry and are skipped; sub-threshold get opportunity: null.
+    const results: TriangularResult[] = [];
+    for (const r of settled) {
+      if (r.status === 'fulfilled' && r.value !== null) {
+        results.push(r.value);
       }
     }
 
-    opportunities.sort((a, b) => Number(b.grossProfit - a.grossProfit));
-    return opportunities;
+    results.sort((a, b) => Number(b.grossProfit - a.grossProfit));
+    return results;
   }
 
   private async simulate(
@@ -113,8 +115,6 @@ export class TriangularArbSignal {
       const grossProfit = finalOut - amountIn;
       const spreadBps   = Number((grossProfit * 10_000n) / amountIn);
 
-      if (spreadBps < CONFIG.MIN_PROFIT_BPS) return null;
-
       const route = `USDC→${tokens[1].slice(0, 8)}…→${tokens[2].slice(0, 8)}…→USDC`;
       const hash  = opportunityHash({
         chainId:      CONFIG.CHAIN_ID,
@@ -125,6 +125,10 @@ export class TriangularArbSignal {
         quotedInput:  amountIn.toString(),
         quotedOutput: finalOut.toString(),
       });
+
+      if (spreadBps < CONFIG.MIN_PROFIT_BPS) {
+        return { tokens, fees, amountIn, amountOut: finalOut, grossProfit, spreadBps, opportunity: null };
+      }
 
       logger.debug('TRI', `${route} spread=${spreadBps}bps`);
 

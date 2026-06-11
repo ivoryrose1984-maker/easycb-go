@@ -3,6 +3,7 @@ import CONFIG, { usdcToUsd } from '../core/config';
 import { Opportunity } from '../types/Opportunity';
 import { opportunityHash } from '../core/dedup';
 import { logger } from '../core/logger';
+import { logRejection } from '../core/jsonlLogger';
 
 const QUOTER_ABI = [
   'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
@@ -11,26 +12,27 @@ const QUOTER_ABI = [
 const UNI_FEES  = [100, 500, 3000, 10000];
 const CAKE_FEES = [100, 500, 2500, 10000];  // PancakeSwap V3 uses 2500 not 3000
 
-// Quote at LIQUIDITY_SCALE × loan size; if price degrades > MAX_IMPACT the pool is too thin to fill
-const LIQUIDITY_SCALE      = 10n;
-const LIQUIDITY_MAX_IMPACT = 5_000; // bps — 50% impact at 10× = phantom spread, reject
+// Liquidity depth constants come from CONFIG so they are tunable via .env
+// LIQUIDITY_CHECK_SCALE:    re-quote at N× loan size (default 10)
+// LIQUIDITY_MAX_IMPACT_BPS: reject if price degrades > this many bps at N× (default 5000 = 50%)
 
 type DexId = 'uni-v3' | 'cake-v3';
 
 interface QuoteCandidate { dex: DexId; fee: number; out: bigint; }
 
 export interface DexSpreadResult {
-  pair:        string;
-  tokenIn:     string;
-  tokenOut:    string;
-  buyDex:      DexId;
-  buyFee:      number;
-  sellDex:     DexId;
-  sellFee:     number;
-  spreadBps:   number;
-  loanAmount:  bigint;
-  grossProfit: bigint;
-  opportunity: Opportunity | null;
+  pair:            string;
+  tokenIn:         string;
+  tokenOut:        string;
+  buyDex:          DexId;
+  buyFee:          number;
+  sellDex:         DexId;
+  sellFee:         number;
+  spreadBps:       number;
+  loanAmount:      bigint;
+  grossProfit:     bigint;
+  rejectionReason: string | null;
+  opportunity:     Opportunity | null;
 }
 
 export class DexSpreadSignal {
@@ -110,23 +112,25 @@ export class DexSpreadSignal {
 
       const isOpportunity = spreadBps >= CONFIG.MIN_PROFIT_BPS;
 
-      // Phase 3: liquidity depth check — one extra quote at 10× to reject thin pools.
-      // Only fires when spread already clears the threshold (spares cost on negative scans).
-      let thinPool = false;
+      // Phase 3: liquidity depth check — one extra quote at LIQUIDITY_CHECK_SCALE× to reject
+      // thin pools. Only fires when spread already clears the threshold (≈1% of scans).
+      let thinPool    = false;
+      let impactBps   = 0;
+      const scale     = BigInt(CONFIG.LIQUIDITY_CHECK_SCALE);
       if (isOpportunity) {
         const buyQuoter = bestBuy.dex === 'uni-v3' ? this.uniQuoter : this.cakeQuoter;
         const scaledOut = await buyQuoter.quoteExactInputSingle.staticCall({
           tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
-          amountIn: loanAmount * LIQUIDITY_SCALE, fee: bestBuy.fee, sqrtPriceLimitX96: 0,
+          amountIn: loanAmount * scale, fee: bestBuy.fee, sqrtPriceLimitX96: 0,
         }).then((r: any) => r[0] as bigint).catch(() => 0n);
 
-        const proRata   = bestBuy.out * LIQUIDITY_SCALE;
-        const impactBps = scaledOut > 0n
+        const proRata = bestBuy.out * scale;
+        impactBps     = scaledOut > 0n
           ? Number((proRata - scaledOut) * 10_000n / proRata)
           : 10_000;
-        thinPool = impactBps > LIQUIDITY_MAX_IMPACT;
+        thinPool = impactBps > CONFIG.LIQUIDITY_MAX_IMPACT_BPS;
         if (thinPool) {
-          logger.debug('DEX', `${pair.name} thin-pool: 10× impact=${impactBps}bps — skip`);
+          logger.debug('DEX', `${pair.name} thin-pool: ${CONFIG.LIQUIDITY_CHECK_SCALE}× impact=${impactBps}bps — skip`);
         }
       }
 
@@ -179,26 +183,35 @@ export class DexSpreadSignal {
         builderFeeEst:    0,
         confidenceScore:  Math.min(100, Math.round(spreadBps * 2)),
         rejectionReason:  !isOpportunity
-          ? `Spread ${spreadBps}bps below ${CONFIG.MIN_PROFIT_BPS}bps`
-          : thinPool ? `Thin liquidity: 10× price impact >${LIQUIDITY_MAX_IMPACT}bps`
-          : null,
+          ? `spread_below_threshold: ${spreadBps}bps < ${CONFIG.MIN_PROFIT_BPS}bps`
+          : thinPool
+            ? `thin_pool: ${CONFIG.LIQUIDITY_CHECK_SCALE}x_impact=${impactBps}bps > ${CONFIG.LIQUIDITY_MAX_IMPACT_BPS}bps`
+            : null,
         safetyDecision:   'dry_run_only',
         dryRunOnly:       true,
         liveEligible:     false,
       };
 
+      const finalOpportunity = (isOpportunity && !thinPool) ? opp : null;
+      const rejReason = opp.rejectionReason;
+
+      if (rejReason) {
+        logRejection({ strategyId: 'apex.dex_spread', blockNumber, pair: pair.name, spreadBps, reason: rejReason });
+      }
+
       return {
-        pair:        pair.name,
-        tokenIn:     pair.tokenIn,
-        tokenOut:    pair.tokenOut,
-        buyDex:      bestBuy.dex,
-        buyFee:      bestBuy.fee,
-        sellDex:     bestSell.dex,
-        sellFee:     bestSell.fee,
+        pair:            pair.name,
+        tokenIn:         pair.tokenIn,
+        tokenOut:        pair.tokenOut,
+        buyDex:          bestBuy.dex,
+        buyFee:          bestBuy.fee,
+        sellDex:         bestSell.dex,
+        sellFee:         bestSell.fee,
         spreadBps,
         loanAmount,
-        grossProfit: grossProfitRaw,
-        opportunity: (isOpportunity && !thinPool) ? opp : null,
+        grossProfit:     grossProfitRaw,
+        rejectionReason: rejReason,
+        opportunity:     finalOpportunity,
       };
     } catch (err: any) {
       logger.debug('DEX', `${pair.name} scan error: ${err.message}`);

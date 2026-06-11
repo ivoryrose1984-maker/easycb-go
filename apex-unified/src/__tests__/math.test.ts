@@ -47,6 +47,42 @@ describe('WETH profit to USD', () => {
   });
 });
 
+// ── Liquidity depth filter math ───────────────────────────────────────────────
+
+function liquidityImpactBps(proRataOut: bigint, actualOut: bigint): number {
+  if (actualOut === 0n) return 10_000;
+  return Number((proRataOut - actualOut) * 10_000n / proRataOut);
+}
+
+describe('liquidityImpactBps', () => {
+  it('returns 0 when pool is perfectly deep (no degradation)', () => {
+    // 10× input yields exactly 10× output — no price impact
+    expect(liquidityImpactBps(1_000_000n, 1_000_000n)).toBe(0);
+  });
+
+  it('returns 5000bps for 50% degradation (thin pool threshold)', () => {
+    // pro-rata = 1000, actual = 500 → impact = (1000-500)/1000 * 10000 = 5000bps
+    expect(liquidityImpactBps(1_000n, 500n)).toBe(5_000);
+  });
+
+  it('returns 10000bps when 10× quote completely fails', () => {
+    expect(liquidityImpactBps(1_000_000n, 0n)).toBe(10_000);
+  });
+
+  it('returns 1000bps for 10% degradation (healthy pool)', () => {
+    // pro-rata = 10000, actual = 9000 → (10000-9000)/10000 * 10000 = 1000bps
+    expect(liquidityImpactBps(10_000n, 9_000n)).toBe(1_000);
+  });
+
+  it('correctly identifies phantom spread: same output at 10× (impossible pool)', () => {
+    // If 10× input gives same output as 1× that means massive impact
+    const baseOut  = 1_000n;
+    const proRata  = baseOut * 10n; // expected at 10×
+    const actual   = baseOut;       // pool can't fill more than 1× worth
+    expect(liquidityImpactBps(proRata, actual)).toBe(9_000);
+  });
+});
+
 // ── encode2HopPath ────────────────────────────────────────────────────────────
 
 const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
