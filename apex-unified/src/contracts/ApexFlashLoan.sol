@@ -192,6 +192,12 @@ contract ApexFlashLoan {
         require(flashToken != address(0), "Zero token");
         require(flashAmount > 0, "Zero amount");
 
+        // Path must round-trip: start AND end with flashToken so the loan can
+        // be repaid. Minimum single-hop path is addr(20) + fee(3) + addr(20).
+        require(path.length >= 43, "Path too short");
+        require(address(bytes20(path[:20])) == flashToken, "Path must start with flashToken");
+        require(address(bytes20(path[path.length - 20:])) == flashToken, "Path must end with flashToken");
+
         address[] memory tokens  = new address[](1);
         uint256[] memory amounts = new uint256[](1);
         tokens[0]  = flashToken;
@@ -296,6 +302,15 @@ contract ApexFlashLoan {
         require(bal > 0, "Nothing to withdraw");
         require(IERC20(token).transfer(owner, bal), "Transfer failed");
         emit EmergencyWithdraw(token, bal, owner);
+    }
+
+    /// @notice Rescue native ETH accidentally sent to this contract.
+    function withdrawETH() external onlyOwner nonReentrant {
+        uint256 bal = address(this).balance;
+        require(bal > 0, "No ETH to withdraw");
+        (bool success, ) = payable(owner).call{value: bal}("");
+        require(success, "ETH transfer failed");
+        emit EmergencyWithdraw(address(0), bal, owner);
     }
 
     /// @dev Accept ETH (e.g. from accidental transfers).

@@ -55,7 +55,8 @@ export async function executeLive(
     tx.gasLimit             = BigInt(plan.gasLimit);
     tx.maxFeePerGas         = BigInt(plan.maxFeePerGas);
     tx.maxPriorityFeePerGas = BigInt(plan.maxPriorityFeePerGas);
-    tx.nonce                = await provider.getTransactionCount(wallet.address);
+    // 'pending' avoids nonce collisions when a previous tx is still in the mempool
+    tx.nonce                = await provider.getTransactionCount(wallet.address, 'pending');
     tx.chainId              = BigInt(plan.opportunity.chainId);
 
     const signed = await wallet.signTransaction(tx);
