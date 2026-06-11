@@ -4,8 +4,10 @@ import { Opportunity } from '../types/Opportunity';
 import { opportunityHash } from '../core/dedup';
 import { logger } from '../core/logger';
 
+// Aerodrome V1 (Solidly fork) router — route struct has no factory field.
+// V2 router (0x6Cb…) uses a different struct; this address is V1 only.
 const AERODROME_ROUTER_ABI = [
-  'function getAmountsOut(uint256 amountIn, (address from, address to, bool stable, address factory)[] routes) view returns (uint256[] amounts)',
+  'function getAmountsOut(uint256 amountIn, (address from, address to, bool stable)[] routes) view returns (uint256[] amounts)',
 ];
 
 const UNI_QUOTER_ABI = [
@@ -42,12 +44,10 @@ export class AerodromeSignal {
     ethPriceUsd: bigint = 3_000_000_000n,
   ): Promise<AerodromeSpreadResult | null> {
     try {
-      const factory = CONFIG.CONTRACTS.AERODROME_FACTORY;
-
       // ── Phase 1: buy quotes tokenIn → tokenOut (Aerodrome + Uni V3) ──
       const [aeroBuyOut, uniBuyRaw] = await Promise.all([
         this.router.getAmountsOut(loanAmount, [{
-          from: pair.tokenIn, to: pair.tokenOut, stable: pair.stable, factory,
+          from: pair.tokenIn, to: pair.tokenOut, stable: pair.stable,
         }]).then((a: bigint[]) => a[1]).catch(() => 0n),
         Promise.all(UNI_FEES.map(fee =>
           this.uniQuoter.quoteExactInputSingle.staticCall({
@@ -69,7 +69,7 @@ export class AerodromeSignal {
       // ── Phase 2: sell quotes tokenOut → tokenIn (Aerodrome + Uni V3) ──
       const [aeroSellOut, uniSellRaw] = await Promise.all([
         this.router.getAmountsOut(bestBuyOut, [{
-          from: pair.tokenOut, to: pair.tokenIn, stable: pair.stable, factory,
+          from: pair.tokenOut, to: pair.tokenIn, stable: pair.stable,
         }]).then((a: bigint[]) => a[1]).catch(() => 0n),
         Promise.all(UNI_FEES.map(fee => {
           // Skip the same pool if we bought on Uni V3
