@@ -30,8 +30,10 @@ export const CONFIG = {
   ALLOW_LIVE: process.env.ALLOW_LIVE === 'true',
 
   // Network
-  CHAIN_ID:         parseInt(optional('CHAIN_ID', '8453'), 10) as 8453,
-  ALCHEMY_WSS_URL:  required('ALCHEMY_WSS_URL'),
+  CHAIN_ID:          parseInt(optional('CHAIN_ID', '8453'), 10) as 8453,
+  ALCHEMY_WSS_URL:   required('ALCHEMY_WSS_URL'),
+  BASE_HTTPS_URL:    optional('BASE_HTTPS_URL', ''),    // Alchemy HTTPS — required for FastPathExecutor
+  BASE_SEQUENCER_URL: 'https://mainnet.base.org',
 
   // Strategy feature flags
   ENABLE_DEX_SPREAD_SIGNAL:    flag('ENABLE_DEX_SPREAD_SIGNAL',    true),

@@ -12,7 +12,12 @@ import { ApexTriangularScanner }   from '../scanners/apexTriangularScanner';
 import { AerodromeScanner }        from '../scanners/aerodromeScanner';
 import { checkCircuitBreaker, setInitialBalance } from '../risk/circuitBreaker';
 import { acquireLock }             from '../risk/networkMutex';
+import { FastPathExecutor }        from '../execution/FastPathExecutor';
 import { ethers }                  from 'ethers';
+
+const APEX_ABI = [
+  'function executeArbitrage(address flashToken, uint256 flashAmount, address uniV3Router, bytes calldata path, uint256 minAmountOut) external',
+];
 
 // ── Safety first ──────────────────────────────────────────────────────────────
 assertDryRunMode();
@@ -42,6 +47,7 @@ let currentProvider: ethers.WebSocketProvider;
 let handlerActive  = false;
 let lastBlockMs    = Date.now();
 let reconnecting   = false;
+let fastExec:        FastPathExecutor | null = null;
 
 // ── Fallback RPC (set FALLBACK_RPC_URL in .env to enable) ────────────────────
 const PRIMARY_URL  = CONFIG.ALCHEMY_WSS_URL;
@@ -144,6 +150,7 @@ function registerHandlers(ctx: BotContext): void {
     }
     handlerActive = true;
     stats.blocks++;
+    fastExec?.onBlock(blockNum); // fee-cache warmup — fire-and-forget
 
     try {
       const ethPrice = await getEthPrice();
@@ -228,6 +235,22 @@ async function main(): Promise<void> {
 
   await initTelegram();
   sendAlert(`ApexUnified started\nRun ID: ${runCtx.runId}\nMode: DRY RUN\nChain: Base`);
+
+  // Initialize FastPathExecutor for fee-cache warming and live-path readiness.
+  // Wallet is omitted in dry run — fee cache only; execute() is a no-op under DRY_RUN=true.
+  if (CONFIG.BASE_HTTPS_URL) {
+    fastExec = new FastPathExecutor({
+      primaryRpc:   CONFIG.BASE_HTTPS_URL,
+      sequencerRpc: CONFIG.BASE_SEQUENCER_URL,
+      chainId:      CONFIG.CHAIN_ID,
+      contract:     CONFIG.CONTRACTS.APEX_FLASH_LOAN,
+      abi:          APEX_ABI,
+    });
+    await fastExec.init();
+    logger.info('MAIN', 'FastPathExecutor active — fee cache will warm each block');
+  } else {
+    logger.warn('MAIN', 'BASE_HTTPS_URL not set — FastPathExecutor disabled (add it to .env)');
+  }
 
   if (CONFIG.ENABLE_CEX_CONTEXT) {
     logger.info('MAIN', 'Starting Binance CEX feed...');
