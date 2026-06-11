@@ -2,7 +2,7 @@ import { WebSocketProvider } from 'ethers';
 import { logger } from '../core/logger';
 
 type ListenerEntry  = { event: string; handler: (...args: any[]) => void };
-type ConnectHandler = (provider: WebSocketProvider) => void;
+type ConnectHandler = (provider: WebSocketProvider) => void | Promise<void>;
 
 const BASE_BLOCK_TIME_MS = 2_000;
 
@@ -79,7 +79,9 @@ export class ResilientWsProvider {
     logger.info('RWS', `Connected — head block ${block}`);
 
     for (const h of this.connectHandlers) {
-      try { h(this.provider); } catch { /* ignore */ }
+      try { await h(this.provider); } catch (e: any) {
+        logger.error('RWS', `onConnect hook error: ${e.message}`);
+      }
     }
   }
 
@@ -137,6 +139,11 @@ export class ResilientWsProvider {
       this.provider?.removeAllListeners();
       await this.provider?.destroy();
     } catch { /* already dead */ }
+  }
+
+  async destroy(): Promise<void> {
+    if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = null; }
+    await this.destroyCurrent();
   }
 
   // ── Watchdog — catches silent zombie sockets ──────────────────────────────

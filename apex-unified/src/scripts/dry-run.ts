@@ -3,8 +3,8 @@ import { assertDryRunMode }        from '../core/safety';
 import { getRunContext, uptime }   from '../core/runContext';
 import { logger }                  from '../core/logger';
 import { logSummary, logError }    from '../core/jsonlLogger';
-import { createWsProvider }        from '../core/rpcHealth';
 import { initTelegram, sendAlert, alertError } from '../infrastructure/telegramAlert';
+import { ResilientWsProvider }     from '../infrastructure/ResilientWsProvider';
 import { getCexFeed }              from '../signals/cexContextSignal';
 import { CbEthFairValueScanner }   from '../scanners/cbETHFairValueScanner';
 import { ApexPairScanner }         from '../scanners/apexPairScanner';
@@ -42,61 +42,10 @@ const stats = {
   aerodrome:  { scans: 0, opps: 0, errors: 0 },
 };
 
-// ── Mutable state shared across reconnects ────────────────────────────────────
-let currentProvider: ethers.WebSocketProvider;
-let handlerActive  = false;
-let lastBlockMs    = Date.now();
-let reconnecting   = false;
-let fastExec:        FastPathExecutor | null = null;
-
-// ── Fallback RPC (set FALLBACK_RPC_URL in .env to enable) ────────────────────
-const PRIMARY_URL  = CONFIG.ALCHEMY_WSS_URL;
-const FALLBACK_URL = process.env.FALLBACK_RPC_URL ?? '';
-
-// Switch to fallback after 3 failures within 60 s; retry primary after 5 min
-const FAILURE_WINDOW_MS   = 60_000;
-const FAILURE_THRESHOLD   = 3;
-const FALLBACK_RECOVER_MS = 300_000;
-
-let wsFailureTimes: number[] = [];
-let usingFallback  = false;
-let fallbackSince  = 0;
-
-function recordWsFailure(): void {
-  const now = Date.now();
-  wsFailureTimes = wsFailureTimes.filter(t => now - t < FAILURE_WINDOW_MS);
-  wsFailureTimes.push(now);
-}
-
-function activeRpcUrl(): string {
-  if (!FALLBACK_URL) return PRIMARY_URL;
-
-  if (usingFallback) {
-    if (Date.now() - fallbackSince > FALLBACK_RECOVER_MS) {
-      logger.info('MAIN', 'Attempting to restore primary RPC...');
-      usingFallback = false;
-      wsFailureTimes = [];
-    } else {
-      return FALLBACK_URL;
-    }
-  }
-
-  if (wsFailureTimes.length >= FAILURE_THRESHOLD) {
-    usingFallback = true;
-    fallbackSince = Date.now();
-    logger.warn('MAIN', `${FAILURE_THRESHOLD} WS failures in ${FAILURE_WINDOW_MS / 1000}s — switching to fallback RPC`);
-    sendAlert('Switched to fallback RPC — primary throttled');
-    return FALLBACK_URL;
-  }
-
-  return PRIMARY_URL;
-}
-
 const QUOTER_ABI = [
   'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
 ];
 
-// ── Provider context (recreated on each reconnect) ────────────────────────────
 interface BotContext {
   provider:     ethers.WebSocketProvider;
   quoter:       ethers.Contract;
@@ -110,104 +59,36 @@ function buildContext(p: ethers.WebSocketProvider): BotContext {
   return {
     provider:     p,
     quoter:       new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER, QUOTER_ABI, p),
-    cbethScanner: CONFIG.ENABLE_CBETH_SIGNAL      ? new CbEthFairValueScanner(p)  : null,
-    pairScanner:  CONFIG.ENABLE_DEX_SPREAD_SIGNAL  ? new ApexPairScanner(p)        : null,
-    triScanner:   CONFIG.ENABLE_TRIANGULAR_SIGNAL  ? new ApexTriangularScanner(p)  : null,
-    aeroScanner:  CONFIG.ENABLE_AERODROME_SIGNAL   ? new AerodromeScanner(p)       : null,
+    cbethScanner: CONFIG.ENABLE_CBETH_SIGNAL       ? new CbEthFairValueScanner(p)  : null,
+    pairScanner:  CONFIG.ENABLE_DEX_SPREAD_SIGNAL   ? new ApexPairScanner(p)        : null,
+    triScanner:   CONFIG.ENABLE_TRIANGULAR_SIGNAL   ? new ApexTriangularScanner(p)  : null,
+    aeroScanner:  CONFIG.ENABLE_AERODROME_SIGNAL    ? new AerodromeScanner(p)       : null,
   };
 }
 
-function registerHandlers(ctx: BotContext): void {
-  handlerActive = false;
+// ── Module-level state ────────────────────────────────────────────────────────
+let ctx:           BotContext | null = null;
+let handlerActive  = false;
+let fastExec:      FastPathExecutor | null = null;
 
-  // Per-context ETH price cache (reset on reconnect is fine)
-  let cachedEthPrice = 0n;
-  let lastEthPriceMs = 0;
+// ETH price cache — reset on reconnect (new provider = new quoter)
+let cachedEthPrice = 0n;
+let lastEthPriceMs = 0;
 
-  async function getEthPrice(): Promise<bigint> {
-    if (cachedEthPrice > 0n && Date.now() - lastEthPriceMs < CONFIG.ETH_PRICE_CACHE_MS) {
-      return cachedEthPrice;
-    }
-    try {
-      const r = await ctx.quoter.quoteExactInputSingle.staticCall({
-        tokenIn: CONFIG.TOKENS.WETH, tokenOut: CONFIG.TOKENS.USDC,
-        amountIn: ethers.parseEther('1'), fee: 3000, sqrtPriceLimitX96: 0,
-      });
-      cachedEthPrice = r[0];
-      lastEthPriceMs = Date.now();
-      return cachedEthPrice;
-    } catch { return 3_000_000_000n; }
+async function getEthPrice(): Promise<bigint> {
+  if (!ctx) return 3_000_000_000n;
+  if (cachedEthPrice > 0n && Date.now() - lastEthPriceMs < CONFIG.ETH_PRICE_CACHE_MS) {
+    return cachedEthPrice;
   }
-
-  // Update heartbeat timestamp on every block
-  ctx.provider.on('block', () => { lastBlockMs = Date.now(); });
-
-  // Main block handler
-  ctx.provider.on('block', async (blockNum: number) => {
-    if (handlerActive) {
-      logger.debug('MAIN', `Block ${blockNum} skipped — previous scan still running`);
-      return;
-    }
-    handlerActive = true;
-    stats.blocks++;
-    fastExec?.onBlock(blockNum); // fee-cache warmup — fire-and-forget
-
-    try {
-      const ethPrice = await getEthPrice();
-
-      const [cbethResult, pairResult, triResult, aeroResult] = await Promise.all([
-        ctx.cbethScanner?.scan(ctx.provider, blockNum) ?? Promise.resolve(null),
-        ctx.pairScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
-        ctx.triScanner?.scan(blockNum, ethPrice)       ?? Promise.resolve(null),
-        ctx.aeroScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
-      ]);
-
-      if (cbethResult)  { stats.cbeth.scans      += cbethResult.scanned;  stats.cbeth.opps      += cbethResult.opportunities.length;  stats.cbeth.errors      += cbethResult.errors; }
-      if (pairResult)   { stats.dexSpread.scans  += pairResult.scanned;   stats.dexSpread.opps  += pairResult.opportunities.length;   stats.dexSpread.errors  += pairResult.errors; }
-      if (triResult)    { stats.triangular.scans += triResult.scanned;    stats.triangular.opps += triResult.opportunities.length;    stats.triangular.errors += triResult.errors; }
-      if (aeroResult)   { stats.aerodrome.scans  += aeroResult.scanned;   stats.aerodrome.opps  += aeroResult.opportunities.length;   stats.aerodrome.errors  += aeroResult.errors; }
-
-      if (stats.blocks % 50 === 0) {
-        const up = uptime(START);
-        logger.info('SCAN',
-          `${up} | block=${blockNum} | ` +
-          `cbeth=${stats.cbeth.opps}/${stats.cbeth.scans} ` +
-          `dex=${stats.dexSpread.opps}/${stats.dexSpread.scans} ` +
-          `tri=${stats.triangular.opps}/${stats.triangular.scans} ` +
-          `aero=${stats.aerodrome.opps}/${stats.aerodrome.scans}`
-        );
-      }
-    } catch (err: any) {
-      logError({ timestamp: new Date().toISOString(), block: blockNum, error: err.message });
-      logger.error('BLOCK', `Block ${blockNum} scan failed: ${err.message}`);
-    } finally {
-      handlerActive = false;
-    }
-  });
-}
-
-// ── WebSocket reconnect ───────────────────────────────────────────────────────
-async function reconnect(): Promise<void> {
-  if (reconnecting) return;
-  reconnecting = true;
-  recordWsFailure();
-  const url = activeRpcUrl();
-  logger.warn('MAIN', `Reconnecting WebSocket (${usingFallback ? 'FALLBACK' : 'primary'})...`);
   try {
-    try { await currentProvider.destroy(); } catch { /* ignore */ }
-    currentProvider = await createWsProvider(url, () => { reconnect().catch(() => {}); });
-    const ctx = buildContext(currentProvider);
-    registerHandlers(ctx);
-    lastBlockMs = Date.now();
-    logger.info('MAIN', 'WebSocket reconnected — scanning resumed');
-    sendAlert('WebSocket reconnected — dry run resumed');
-  } catch (err: any) {
-    logger.error('MAIN', `Reconnect failed: ${err.message} — will retry in 30s`);
-    alertError(`Reconnect failed: ${err.message}`);
-    lastBlockMs = Date.now() - 25_000;
-  } finally {
-    reconnecting = false;
-  }
+    const r = await ctx.quoter.quoteExactInputSingle.staticCall({
+      tokenIn: CONFIG.TOKENS.WETH, tokenOut: CONFIG.TOKENS.USDC,
+      amountIn: ethers.parseEther('1'), fee: 3000, sqrtPriceLimitX96: 0,
+    });
+    cachedEthPrice = r[0];
+    lastEthPriceMs = Date.now();
+    return cachedEthPrice;
+  } catch { return 3_000_000_000n; }
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -236,8 +117,7 @@ async function main(): Promise<void> {
   await initTelegram();
   sendAlert(`ApexUnified started\nRun ID: ${runCtx.runId}\nMode: DRY RUN\nChain: Base`);
 
-  // Initialize FastPathExecutor for fee-cache warming and live-path readiness.
-  // Wallet is omitted in dry run — fee cache only; execute() is a no-op under DRY_RUN=true.
+  // FastPathExecutor for fee-cache warming (no wallet in dry run — execute() is a no-op)
   if (CONFIG.BASE_HTTPS_URL) {
     fastExec = new FastPathExecutor({
       primaryRpc:   CONFIG.BASE_HTTPS_URL,
@@ -249,7 +129,7 @@ async function main(): Promise<void> {
     await fastExec.init();
     logger.info('MAIN', 'FastPathExecutor active — fee cache will warm each block');
   } else {
-    logger.warn('MAIN', 'BASE_HTTPS_URL not set — FastPathExecutor disabled (add it to .env)');
+    logger.warn('MAIN', 'BASE_HTTPS_URL not set — FastPathExecutor disabled (add to .env)');
   }
 
   if (CONFIG.ENABLE_CEX_CONTEXT) {
@@ -258,19 +138,83 @@ async function main(): Promise<void> {
     await new Promise(r => setTimeout(r, 2_000));
   }
 
-  logger.info('MAIN', 'Connecting to Base via WebSocket...');
-  currentProvider = await createWsProvider(PRIMARY_URL, () => { reconnect().catch(() => {}); });
-  logger.info('MAIN', 'Connected');
+  const monitorAddress  = process.env.WALLET_ADDRESS ?? process.env.MONITOR_ADDRESS ?? '';
+  let   initialBalSet   = false;
+  let   firstConnect    = true;
 
-  const ctx = buildContext(currentProvider);
-  registerHandlers(ctx);
+  // ── ResilientWsProvider ───────────────────────────────────────────────────
+  const rws = new ResilientWsProvider(CONFIG.ALCHEMY_WSS_URL, CONFIG.CHAIN_ID);
 
-  // ── Circuit breaker ───────────────────────────────────────────────────────
-  const monitorAddress = process.env.WALLET_ADDRESS ?? process.env.MONITOR_ADDRESS ?? '';
+  // Rebuild scan context on every (re)connect — scanners hold provider refs
+  rws.onConnect(async (provider) => {
+    ctx            = buildContext(provider);
+    cachedEthPrice = 0n;
+    lastEthPriceMs = 0;
+
+    // Circuit breaker: set baseline balance only on first connect
+    if (monitorAddress && !initialBalSet) {
+      try {
+        const bal = await provider.getBalance(monitorAddress);
+        setInitialBalance(bal);
+        initialBalSet = true;
+      } catch (e: any) {
+        logger.warn('MAIN', `Could not read initial balance: ${e.message}`);
+      }
+    }
+
+    if (!firstConnect) sendAlert('WebSocket reconnected — dry run resumed');
+    firstConnect = false;
+  });
+
+  // Main block handler — registered on rws, replayed on every reconnect
+  rws.on('block', async (blockNum: number) => {
+    if (handlerActive || !ctx) {
+      if (handlerActive) logger.debug('MAIN', `Block ${blockNum} skipped — previous scan still running`);
+      return;
+    }
+    handlerActive = true;
+    stats.blocks++;
+    fastExec?.onBlock(blockNum); // fee-cache warmup — fire-and-forget
+
+    try {
+      const ethPrice = await getEthPrice();
+
+      const [cbethResult, pairResult, triResult, aeroResult] = await Promise.all([
+        ctx.cbethScanner?.scan(ctx.provider, blockNum) ?? Promise.resolve(null),
+        ctx.pairScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
+        ctx.triScanner?.scan(blockNum, ethPrice)       ?? Promise.resolve(null),
+        ctx.aeroScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
+      ]);
+
+      if (cbethResult)  { stats.cbeth.scans      += cbethResult.scanned;  stats.cbeth.opps      += cbethResult.opportunities.length;  stats.cbeth.errors      += cbethResult.errors; }
+      if (pairResult)   { stats.dexSpread.scans  += pairResult.scanned;   stats.dexSpread.opps  += pairResult.opportunities.length;   stats.dexSpread.errors  += pairResult.errors; }
+      if (triResult)    { stats.triangular.scans += triResult.scanned;    stats.triangular.opps += triResult.opportunities.length;    stats.triangular.errors += triResult.errors; }
+      if (aeroResult)   { stats.aerodrome.scans  += aeroResult.scanned;   stats.aerodrome.opps  += aeroResult.opportunities.length;   stats.aerodrome.errors  += aeroResult.errors; }
+
+      if (stats.blocks % 50 === 0) {
+        const up = uptime(START);
+        logger.info('SCAN',
+          `${up} | block=${blockNum} | ` +
+          `cbeth=${stats.cbeth.opps}/${stats.cbeth.scans} ` +
+          `dex=${stats.dexSpread.opps}/${stats.dexSpread.scans} ` +
+          `tri=${stats.triangular.opps}/${stats.triangular.scans} ` +
+          `aero=${stats.aerodrome.opps}/${stats.aerodrome.scans}`,
+        );
+      }
+    } catch (err: any) {
+      logError({ timestamp: new Date().toISOString(), block: blockNum, error: err.message });
+      logger.error('BLOCK', `Block ${blockNum} scan failed: ${err.message}`);
+    } finally {
+      handlerActive = false;
+    }
+  });
+
+  // ── Circuit breaker polling ───────────────────────────────────────────────
   if (monitorAddress) {
-    const initBal = await currentProvider.getBalance(monitorAddress);
-    setInitialBalance(initBal);
-    setInterval(() => checkCircuitBreaker(currentProvider, monitorAddress), 30_000);
+    setInterval(() => {
+      // rws.provider may be null/stale during reconnect — skip silently
+      try { checkCircuitBreaker(rws.provider, monitorAddress); } catch {}
+    }, 30_000);
   }
 
   // ── Hourly summary ────────────────────────────────────────────────────────
@@ -294,7 +238,7 @@ async function main(): Promise<void> {
       `${up} | blocks=${stats.blocks} | ` +
       `total_opps=${summary.total_opps} ` +
       `(cbeth=${stats.cbeth.opps} dex=${stats.dexSpread.opps} tri=${stats.triangular.opps} aero=${stats.aerodrome.opps}) ` +
-      `errors=${summary.errors}`
+      `errors=${summary.errors}`,
     );
     sendAlert(
       `Hourly summary — ${up}\n` +
@@ -302,29 +246,23 @@ async function main(): Promise<void> {
       `cbETH opps: ${stats.cbeth.opps}\n` +
       `DEX spread opps: ${stats.dexSpread.opps}\n` +
       `Triangular opps: ${stats.triangular.opps}\n` +
-      `Aerodrome opps: ${stats.aerodrome.opps}`
+      `Aerodrome opps: ${stats.aerodrome.opps}`,
     );
   }, 60 * 60 * 1_000);
 
   // ── Graceful shutdown ─────────────────────────────────────────────────────
   async function shutdown(signal: string) {
     logger.info('MAIN', `${signal} received — shutting down`);
-    try { await currentProvider.destroy(); } catch { /* ignore */ }
+    await rws.destroy();
     process.exit(0);
   }
   process.on('SIGINT',  () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  // ── WebSocket heartbeat + auto-reconnect ──────────────────────────────────
-  setInterval(async () => {
-    const silentMs = Date.now() - lastBlockMs;
-    if (silentMs > 30_000) {
-      const msg = `No block in ${Math.round(silentMs / 1000)}s — reconnecting`;
-      logger.error('MAIN', msg);
-      sendAlert(msg);
-      await reconnect();
-    }
-  }, 15_000);
+  // ── Connect ───────────────────────────────────────────────────────────────
+  logger.info('MAIN', 'Connecting to Base via WebSocket...');
+  await rws.start();
+  logger.info('MAIN', 'Connected — scanning started');
 }
 
 main().catch(err => {
