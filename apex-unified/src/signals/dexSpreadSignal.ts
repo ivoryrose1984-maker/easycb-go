@@ -11,6 +11,10 @@ const QUOTER_ABI = [
 const UNI_FEES  = [100, 500, 3000, 10000];
 const CAKE_FEES = [100, 500, 2500, 10000];  // PancakeSwap V3 uses 2500 not 3000
 
+// Quote at LIQUIDITY_SCALE × loan size; if price degrades > MAX_IMPACT the pool is too thin to fill
+const LIQUIDITY_SCALE      = 10n;
+const LIQUIDITY_MAX_IMPACT = 5_000; // bps — 50% impact at 10× = phantom spread, reject
+
 type DexId = 'uni-v3' | 'cake-v3';
 
 interface QuoteCandidate { dex: DexId; fee: number; out: bigint; }
@@ -106,6 +110,26 @@ export class DexSpreadSignal {
 
       const isOpportunity = spreadBps >= CONFIG.MIN_PROFIT_BPS;
 
+      // Phase 3: liquidity depth check — one extra quote at 10× to reject thin pools.
+      // Only fires when spread already clears the threshold (spares cost on negative scans).
+      let thinPool = false;
+      if (isOpportunity) {
+        const buyQuoter = bestBuy.dex === 'uni-v3' ? this.uniQuoter : this.cakeQuoter;
+        const scaledOut = await buyQuoter.quoteExactInputSingle.staticCall({
+          tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
+          amountIn: loanAmount * LIQUIDITY_SCALE, fee: bestBuy.fee, sqrtPriceLimitX96: 0,
+        }).then((r: any) => r[0] as bigint).catch(() => 0n);
+
+        const proRata   = bestBuy.out * LIQUIDITY_SCALE;
+        const impactBps = scaledOut > 0n
+          ? Number((proRata - scaledOut) * 10_000n / proRata)
+          : 10_000;
+        thinPool = impactBps > LIQUIDITY_MAX_IMPACT;
+        if (thinPool) {
+          logger.debug('DEX', `${pair.name} thin-pool: 10× impact=${impactBps}bps — skip`);
+        }
+      }
+
       const hash = opportunityHash({
         chainId:      CONFIG.CHAIN_ID,
         strategyId:   'apex.dex_spread',
@@ -154,7 +178,10 @@ export class DexSpreadSignal {
         flashLoanFeeEst:  0,
         builderFeeEst:    0,
         confidenceScore:  Math.min(100, Math.round(spreadBps * 2)),
-        rejectionReason:  isOpportunity ? null : `Spread ${spreadBps}bps below ${CONFIG.MIN_PROFIT_BPS}bps`,
+        rejectionReason:  !isOpportunity
+          ? `Spread ${spreadBps}bps below ${CONFIG.MIN_PROFIT_BPS}bps`
+          : thinPool ? `Thin liquidity: 10× price impact >${LIQUIDITY_MAX_IMPACT}bps`
+          : null,
         safetyDecision:   'dry_run_only',
         dryRunOnly:       true,
         liveEligible:     false,
@@ -171,7 +198,7 @@ export class DexSpreadSignal {
         spreadBps,
         loanAmount,
         grossProfit: grossProfitRaw,
-        opportunity: isOpportunity ? opp : null,
+        opportunity: (isOpportunity && !thinPool) ? opp : null,
       };
     } catch (err: any) {
       logger.debug('DEX', `${pair.name} scan error: ${err.message}`);
