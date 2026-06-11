@@ -26,7 +26,7 @@ apex-unified/src/
   execution/   dryRunExecutor, liveExecutor, gasForecaster, flashLoanPlanner, routePlanner, bundlePlanner
   risk/        circuitBreaker, lossLimits, strategyKillSwitch, exposureLimits, networkMutex
   research/    replayEngine, backtester, opportunityScorer, reportGenerator, parameterOptimizer
-  infrastructure/ telegramAlert
+  infrastructure/ telegramAlert, ResilientWsProvider
   contracts/   ApexFlashLoan.sol
   types/       Opportunity, StrategyResult, ExecutionPlan, RiskDecision, RunReport
   scripts/     dry-run.ts, generate-report.ts, replay.ts, deploy-contract.ts
@@ -144,6 +144,7 @@ All of the following were identified and fixed before dry run:
 17. `liveExecutor.ts` broadcast without simulating — now `executeArbitrage.staticCall()` before signing; reverts are caught pre-broadcast, no gas spent
 18. WS keepalive `setInterval` leaked on every reconnect (pinging dead sockets, accumulating timers) — now cleared via `ws.on('close')`; reconnect trigger also debounced so error+close can't double-fire
 19. Daily loss counter reset on local-time midnight — now resets on UTC day boundary (matches chain time and JSONL logs)
+20. Manual reconnect loop replaced with `ResilientWsProvider` (`infrastructure/ResilientWsProvider.ts`): exponential backoff with full jitter (1s→60s), 10s floor on 429s, 30s block-silence watchdog (catches zombie sockets PM2 can't see), listener replay across reconnects, `onConnect()` hook rebuilds scanner context, `process.exit(1)` only after 20 consecutive failures. Log prefix: `[RWS]`
 
 ### Known data caveats
 - `apex.aerodrome_spread`: 0 profitable out of 10,775 scans (Jun 8–9) — disabled on VPS (`ENABLE_AERODROME_SIGNAL=false`) pending investigation
