@@ -5,6 +5,7 @@ export { CaptureStats };
 
 export interface StrategyStats {
   strategyId:          StrategyId;
+  disabled?:           string;    // set when the corresponding ENABLE_* flag is false
   totalScans:          number;
   totalOpportunities:  number;
   acceptedOpportunities: number;

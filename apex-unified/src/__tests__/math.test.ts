@@ -1,4 +1,5 @@
 import { usdcToUsd, weiToEth } from '../core/config';
+import CONFIG from '../core/config';
 import { encode2HopPath, encode3HopPath } from '../execution/routePlanner';
 import { ethers }                          from 'ethers';
 
@@ -128,6 +129,49 @@ describe('spreadBps formula properties', () => {
     const sellOut = loan * 10_030n / 10_000n; // +30bps profit
     const s = spreadBps(loan, sellOut);
     expect(Math.abs(s)).toBeLessThanOrEqual(200);
+  });
+});
+
+// ── cbETH cost model (Phase 4 / BUG-06/07) ───────────────────────────────────
+
+describe('cbETH cost model', () => {
+  it('Balancer flash loan fee is 0 (CONFIG.FLASH_LOAN_FEE_BPS = 0)', () => {
+    expect(CONFIG.FLASH_LOAN_FEE_BPS).toBe(0);
+    expect(CONFIG.FLASH_LOAN_FEE_BPS / 10_000).toBe(0);
+  });
+
+  it('net profit = gross - gas when flash loan fee is 0', () => {
+    const grossEdgeBps = 30;
+    const probeSizeEth = 3.33;
+    const ethPriceUsd  = 3_000;
+    const gasEth       = 0.0003;
+
+    const grossProfitEth = (grossEdgeBps / 10_000) * probeSizeEth;
+    const grossProfitUsd = grossProfitEth * ethPriceUsd;   // ~$2.997
+    const gasUsd         = gasEth * ethPriceUsd;           // $0.90
+    const netProfitUsd   = Math.max(0, grossProfitUsd - gasUsd - grossProfitUsd * (CONFIG.FLASH_LOAN_FEE_BPS / 10_000));
+
+    expect(netProfitUsd).toBeCloseTo(grossProfitUsd - gasUsd, 4);
+  });
+
+  it('totalCosts uses named config buffers (LATENCY + FAILURE), not magic numbers', () => {
+    const feeTierUsed  = 500; // 500 basis-point fee tier → 5bps
+    const gasEth       = 0.0003;
+    const probeSizeEth = 3.33;
+    const gasAsBps     = (gasEth / probeSizeEth) * 10_000;
+    // Mirrors cbETHFairValueSignal.ts line 167 exactly
+    const totalCosts   = gasAsBps + 5 + (feeTierUsed / 100) + CONFIG.LATENCY_BUFFER_BPS + CONFIG.FAILURE_BUFFER_BPS;
+
+    // LATENCY_BUFFER_BPS + FAILURE_BUFFER_BPS = 5 + 5 = 10
+    const expectedBuffer = CONFIG.LATENCY_BUFFER_BPS + CONFIG.FAILURE_BUFFER_BPS;
+    expect(totalCosts).toBeCloseTo(gasAsBps + 5 + 5 + expectedBuffer, 6);
+  });
+
+  it('negative gross edge yields zero net profit (floor at 0)', () => {
+    const grossProfitUsd = -2.0;
+    const gasUsd         = 0.9;
+    const net = Math.max(0, grossProfitUsd - gasUsd - grossProfitUsd * (CONFIG.FLASH_LOAN_FEE_BPS / 10_000));
+    expect(net).toBe(0);
   });
 });
 

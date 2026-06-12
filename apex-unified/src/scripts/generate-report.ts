@@ -15,14 +15,19 @@ async function main(): Promise<void> {
   console.log('');
 
   for (const s of report.strategies) {
-    console.log(`  ── Strategy: ${s.strategyId}`);
-    console.log(`     Scans:        ${s.totalScans}`);
-    console.log(`     Accepted:     ${s.acceptedOpportunities}`);
-    console.log(`     Rejected:     ${s.rejectedOpportunities}`);
-    console.log(`     Gross P&L:    $${s.grossEstimatedProfitUsd.toFixed(2)}`);
-    console.log(`     Net P&L:      $${s.netEstimatedProfitUsd.toFixed(2)}`);
-    console.log(`     Median bps:   ${s.medianOpportunityBps}`);
-    console.log(`     False pos:    ${(s.falsePositiveRate * 100).toFixed(1)}%`);
+    const disabledTag = s.disabled ? `  [DISABLED: ${s.disabled}]` : '';
+    console.log(`  ── Strategy: ${s.strategyId}${disabledTag}`);
+    if (s.disabled) {
+      console.log(`     (no data — strategy disabled at startup)`);
+    } else {
+      console.log(`     Scans:        ${s.totalScans}`);
+      console.log(`     Accepted:     ${s.acceptedOpportunities}`);
+      console.log(`     Rejected:     ${s.rejectedOpportunities}`);
+      console.log(`     Gross P&L:    $${s.grossEstimatedProfitUsd.toFixed(2)}`);
+      console.log(`     Net P&L:      $${s.netEstimatedProfitUsd.toFixed(2)}`);
+      console.log(`     Median bps:   ${s.medianOpportunityBps}`);
+      console.log(`     False pos:    ${(s.falsePositiveRate * 100).toFixed(1)}%`);
+    }
     console.log('');
   }
 

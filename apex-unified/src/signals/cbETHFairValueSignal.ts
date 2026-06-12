@@ -164,7 +164,7 @@ export class CbEthFairValueSignal {
     const gasEth       = 0.0003;
     const probeSizeEth = Number(ethers.formatEther(PROBE_WETH));
     const gasAsBps     = (gasEth / probeSizeEth) * 10_000;
-    const totalCosts   = gasAsBps + 5 + (feeTierUsed / 100) + 10 + 5;
+    const totalCosts   = gasAsBps + 5 + (feeTierUsed / 100) + CONFIG.LATENCY_BUFFER_BPS + CONFIG.FAILURE_BUFFER_BPS;
     const netEdgeBps   = grossEdgeBps - totalCosts;
 
     const hash = opportunityHash({
@@ -184,7 +184,7 @@ export class CbEthFairValueSignal {
     const grossProfitEth = (grossEdgeBps / 10_000) * probeSizeEth;
     const grossProfitUsd = parseFloat((grossProfitEth * ethPriceUsd).toFixed(4));
     const gasUsd         = 0.0003 * ethPriceUsd;
-    const netProfitUsd   = parseFloat(Math.max(0, grossProfitUsd - gasUsd - grossProfitUsd * 0.0005).toFixed(4));
+    const netProfitUsd   = parseFloat(Math.max(0, grossProfitUsd - gasUsd - grossProfitUsd * (CONFIG.FLASH_LOAN_FEE_BPS / 10_000)).toFixed(4));
 
     logger.debug('cbETH',
       `block=${blockNumber} rate=${fairWethPerCbEth.toFixed(6)} source=${rateSource} ` +

@@ -10,6 +10,16 @@ const STRATEGY_IDS: StrategyId[] = [
   'apex.dex_spread', 'apex.triangular', 'grok.cbeth_fair_value', 'apex.aerodrome_spread',
 ];
 
+function strategyEnabledInfo(id: string): { enabled: boolean; flagName: string } {
+  switch (id) {
+    case 'apex.dex_spread':       return { enabled: CONFIG.ENABLE_DEX_SPREAD_SIGNAL,  flagName: 'ENABLE_DEX_SPREAD_SIGNAL' };
+    case 'apex.triangular':       return { enabled: CONFIG.ENABLE_TRIANGULAR_SIGNAL,   flagName: 'ENABLE_TRIANGULAR_SIGNAL' };
+    case 'grok.cbeth_fair_value': return { enabled: CONFIG.ENABLE_CBETH_SIGNAL,        flagName: 'ENABLE_CBETH_SIGNAL' };
+    case 'apex.aerodrome_spread': return { enabled: CONFIG.ENABLE_AERODROME_SIGNAL,    flagName: 'ENABLE_AERODROME_SIGNAL' };
+    default:                      return { enabled: true, flagName: '' };
+  }
+}
+
 function zeroStats(strategyId: StrategyId): StrategyStats {
   return {
     strategyId,
@@ -30,10 +40,14 @@ function zeroStats(strategyId: StrategyId): StrategyStats {
 
 // D2: single source of truth — derive StrategyStats exclusively from capture-*.jsonl
 function buildStatsFromCapture(strategyId: StrategyId, captureArr: CaptureStats[]): StrategyStats {
+  const { enabled, flagName } = strategyEnabledInfo(strategyId);
+  const disabled = !enabled ? `${flagName}=false` : undefined;
+
   const c = captureArr.find(s => s.strategyId === strategyId);
-  if (!c) return zeroStats(strategyId);
+  if (!c) return { ...zeroStats(strategyId), disabled };
   return {
     strategyId,
+    disabled,
     totalScans:              c.detected,
     totalOpportunities:      c.passed,
     acceptedOpportunities:   c.passed,
