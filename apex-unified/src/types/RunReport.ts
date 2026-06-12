@@ -23,6 +23,7 @@ export interface RunReport {
   runId:              string;
   botId:              string;
   generatedAt:        string;
+  cleanDataSince:     string;           // ISO timestamp — all figures exclude events before this
   periodStartMs:      number;
   periodEndMs:        number;
   durationHours:      number;

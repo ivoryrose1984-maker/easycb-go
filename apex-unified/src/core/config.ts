@@ -51,6 +51,7 @@ export const CONFIG = {
   MAX_PER_TRADE_LOSS_USD: parseInt(optional('MAX_PER_TRADE_LOSS_USD', '100'),  10),
   MIN_NET_EDGE_BPS:      parseInt(optional('MIN_NET_EDGE_BPS',       '5'),     10),
   CEX_TRIGGER_BPS:       parseInt(optional('CEX_TRIGGER_BPS',        '15'),    10),
+  DRAWDOWN_THRESHOLD:    parseFloat(optional('DRAWDOWN_THRESHOLD',    '50')),  // % balance drawdown to trigger circuit breaker (last-resort safeguard)
 
   // Liquidity filter — reject thin pools before counting as opportunities
   LIQUIDITY_CHECK_SCALE:    parseInt(optional('LIQUIDITY_CHECK_SCALE',    '10'),   10),
@@ -119,7 +120,8 @@ export const CONFIG = {
   TELEGRAM_BOT_TOKEN:    process.env.TELEGRAM_BOT_TOKEN,
   TELEGRAM_CHAT_ID:      process.env.TELEGRAM_CHAT_ID,
 
-  DRAWDOWN_THRESHOLD: 50,
+  // Reporting — exclude all events before this timestamp from every figure
+  CLEAN_DATA_SINCE: optional('CLEAN_DATA_SINCE', '2026-06-12T16:05:00Z'),
   LOG_LEVEL: process.env.LOG_LEVEL ?? (process.env.DRY_RUN !== 'false' ? 'debug' : 'info'),
 } as const;
 

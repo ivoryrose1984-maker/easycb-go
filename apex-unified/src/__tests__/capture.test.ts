@@ -171,3 +171,74 @@ describe('readCaptureStats', () => {
     }
   });
 });
+
+// ── readCaptureStats sinceMs filter (WO-3 CLEAN_DATA_SINCE) ──────────────────
+
+describe('readCaptureStats — sinceMs filter', () => {
+  const OLD_TS = 1_000_000;
+  const NEW_TS = 2_000_000;
+  const SINCE  = 1_500_000;
+
+  const fakeLine = (ts: number, filterResult: 'pass' | 'skip', spreadBps = 30) =>
+    JSON.stringify({
+      event:              'detected',
+      opportunityId:      `opp-${ts}-${filterResult}`,
+      strategyId:         'apex.dex_spread',
+      block:              1,
+      ts_ms:              ts,
+      path:               'USDC/WETH',
+      spread_bps:         spreadBps,
+      expected_gross_usd: 10,
+      expected_net_usd:   8,
+      loan_size:          '5000000000',
+      filter_result:      filterResult,
+      skip_reason:        filterResult === 'skip' ? 'below_threshold' : null,
+    });
+
+  const FAKE_CONTENT = [
+    fakeLine(OLD_TS, 'pass'),
+    fakeLine(NEW_TS, 'pass'),
+    fakeLine(OLD_TS, 'skip'),
+    fakeLine(NEW_TS, 'skip'),
+  ].join('\n');
+
+  beforeEach(() => {
+    const fs = require('fs') as typeof import('fs');
+    jest.spyOn(fs, 'existsSync').mockReturnValue(true);
+    (jest.spyOn(fs, 'readFileSync') as jest.SpyInstance).mockReturnValue(FAKE_CONTENT);
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('without sinceMs includes all 4 events', () => {
+    const stats = readCaptureStats(['2026-06-12']);
+    expect(stats).toHaveLength(1);
+    expect(stats[0].detected).toBe(4);
+    expect(stats[0].passed).toBe(2);
+    expect(stats[0].skipped).toBe(2);
+  });
+
+  it('with sinceMs excludes the 2 events before the threshold', () => {
+    const stats = readCaptureStats(['2026-06-12'], SINCE);
+    expect(stats).toHaveLength(1);
+    expect(stats[0].detected).toBe(2);
+    expect(stats[0].passed).toBe(1);
+    expect(stats[0].skipped).toBe(1);
+  });
+
+  it('excludes pre-window events from P&L figures', () => {
+    const stats = readCaptureStats(['2026-06-12'], SINCE);
+    expect(stats[0].grossEstimatedProfitUsd).toBeCloseTo(10);
+    expect(stats[0].netEstimatedProfitUsd).toBeCloseTo(8);
+  });
+
+  it('excludes pre-window skips from skipReasonBreakdown', () => {
+    const stats = readCaptureStats(['2026-06-12'], SINCE);
+    expect(stats[0].skipReasonBreakdown['below_threshold']).toBe(1);
+  });
+
+  it('sinceMs equal to event ts_ms includes that event (filter is strict <)', () => {
+    const stats = readCaptureStats(['2026-06-12'], NEW_TS);
+    expect(stats[0].detected).toBe(2);
+  });
+});

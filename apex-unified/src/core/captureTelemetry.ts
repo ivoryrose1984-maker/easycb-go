@@ -49,18 +49,24 @@ export interface ResolveParams {
 }
 
 export interface CaptureStats {
-  strategyId:           string;
-  detected:             number;
-  passed:               number;
-  submitted:            number;
-  resolved:             number;
-  landedProfit:         number;
-  submissionRate:       number;   // submitted / passed (n/a = 0 in dry-run)
-  inclusionRate:        number;   // resolved-landed / submitted
-  winRate:              number;   // LANDED_PROFIT / resolved-landed
-  captureRate:          number;   // LANDED_PROFIT / detected
-  avgProfitDelta:       number | null;  // avg (actual_net - expected_net); null in dry-run
-  avgDetectToIncBlocks: number | null;  // null in dry-run
+  strategyId:              string;
+  detected:                number;
+  passed:                  number;
+  skipped:                 number;
+  submitted:               number;
+  resolved:                number;
+  landedProfit:            number;
+  submissionRate:          number;   // submitted / passed (n/a = 0 in dry-run)
+  inclusionRate:           number;   // resolved-landed / submitted
+  winRate:                 number;   // LANDED_PROFIT / resolved-landed
+  captureRate:             number;   // LANDED_PROFIT / detected
+  avgProfitDelta:          number | null;  // avg (actual_net - expected_net); null in dry-run
+  avgDetectToIncBlocks:    number | null;  // null in dry-run
+  // D2 single-source P&L fields (from pass events only)
+  grossEstimatedProfitUsd: number;
+  netEstimatedProfitUsd:   number;
+  medianSpreadBps:         number;
+  skipReasonBreakdown:     Record<string, number>;
 }
 
 // ── Module-level state ────────────────────────────────────────────────────────
@@ -155,7 +161,8 @@ export function captureResolved(p: ResolveParams): void {
 
 // ── Report helper ─────────────────────────────────────────────────────────────
 
-export function readCaptureStats(dates: string[]): CaptureStats[] {
+// sinceMs: exclude all events with ts_ms < sinceMs (CLEAN_DATA_SINCE gate).
+export function readCaptureStats(dates: string[], sinceMs = 0): CaptureStats[] {
   // All three event types share the same file. Join by opportunityId to bucket
   // submitted/resolved under the strategy of their detected event.
   const detected:  any[] = [];
@@ -168,6 +175,7 @@ export function readCaptureStats(dates: string[]): CaptureStats[] {
     for (const line of fs.readFileSync(f, 'utf8').split('\n').filter(Boolean)) {
       try {
         const e = JSON.parse(line);
+        if (sinceMs > 0 && (e.ts_ms ?? 0) < sinceMs) continue;
         if      (e.event === 'detected')  detected.push(e);
         else if (e.event === 'submitted') submitted.push(e);
         else if (e.event === 'resolved')  resolved.push(e);
@@ -194,27 +202,46 @@ export function readCaptureStats(dates: string[]): CaptureStats[] {
 
   const stats: CaptureStats[] = [];
   for (const [sid, b] of byStrategy) {
-    const passed       = b.detected.filter(e => e.filter_result === 'pass').length;
+    const passEvents   = b.detected.filter(e => e.filter_result === 'pass');
+    const passed       = passEvents.length;
+    const skipped      = b.detected.length - passed;
     const sub          = b.submitted.length;
     const landed       = b.resolved.filter(e => e.outcome === 'LANDED_PROFIT' || e.outcome === 'LANDED_LOSS').length;
     const landedProfit = b.resolved.filter(e => e.outcome === 'LANDED_PROFIT').length;
 
-    const deltas     = b.resolved.map(e => e.expected_vs_actual_delta).filter((v): v is number => v !== null);
-    const blkTimes   = b.resolved.map(e => e.blocks_elapsed).filter((v): v is number => v !== null);
+    const deltas   = b.resolved.map(e => e.expected_vs_actual_delta).filter((v): v is number => v !== null);
+    const blkTimes = b.resolved.map(e => e.blocks_elapsed).filter((v): v is number => v !== null);
+
+    // P&L from pass events (D2 single source of truth)
+    const grossTotal = passEvents.reduce((s, e) => s + (e.expected_gross_usd ?? 0), 0);
+    const netTotal   = passEvents.reduce((s, e) => s + (e.expected_net_usd   ?? 0), 0);
+    const bpsArr     = passEvents.map(e => e.spread_bps as number).sort((a, c) => a - c);
+    const median     = bpsArr.length > 0 ? bpsArr[Math.floor(bpsArr.length / 2)] : 0;
+
+    const skipBreakdown: Record<string, number> = {};
+    for (const e of b.detected.filter(e => e.filter_result === 'skip')) {
+      const key = e.skip_reason ?? 'unknown';
+      skipBreakdown[key] = (skipBreakdown[key] ?? 0) + 1;
+    }
 
     stats.push({
-      strategyId:           sid,
-      detected:             b.detected.length,
+      strategyId:              sid,
+      detected:                b.detected.length,
       passed,
-      submitted:            sub,
-      resolved:             b.resolved.length,
+      skipped,
+      submitted:               sub,
+      resolved:                b.resolved.length,
       landedProfit,
-      submissionRate:       passed > 0   ? sub          / passed : 0,
-      inclusionRate:        sub    > 0   ? landed        / sub    : 0,
-      winRate:              landed > 0   ? landedProfit  / landed : 0,
-      captureRate:          b.detected.length > 0 ? landedProfit / b.detected.length : 0,
-      avgProfitDelta:       deltas.length   > 0 ? deltas.reduce((a, b) => a + b, 0)   / deltas.length   : null,
-      avgDetectToIncBlocks: blkTimes.length > 0 ? blkTimes.reduce((a, b) => a + b, 0) / blkTimes.length : null,
+      submissionRate:          passed > 0 ? sub          / passed : 0,
+      inclusionRate:           sub    > 0 ? landed        / sub    : 0,
+      winRate:                 landed > 0 ? landedProfit  / landed : 0,
+      captureRate:             b.detected.length > 0 ? landedProfit / b.detected.length : 0,
+      avgProfitDelta:          deltas.length   > 0 ? deltas.reduce((a, c) => a + c, 0)   / deltas.length   : null,
+      avgDetectToIncBlocks:    blkTimes.length > 0 ? blkTimes.reduce((a, c) => a + c, 0) / blkTimes.length : null,
+      grossEstimatedProfitUsd: grossTotal,
+      netEstimatedProfitUsd:   netTotal,
+      medianSpreadBps:         median,
+      skipReasonBreakdown:     skipBreakdown,
     });
   }
 

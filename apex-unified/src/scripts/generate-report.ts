@@ -8,9 +8,10 @@ async function main(): Promise<void> {
   console.log('\n' + '═'.repeat(65));
   console.log('  APEX UNIFIED — 72-HOUR DRY-RUN REPORT');
   console.log('═'.repeat(65));
-  console.log(`  Run ID:      ${report.runId}`);
-  console.log(`  Period:      ${new Date(report.periodStartMs).toISOString()} → ${new Date(report.periodEndMs).toISOString()}`);
-  console.log(`  Generated:   ${report.generatedAt}`);
+  console.log(`  Run ID:         ${report.runId}`);
+  console.log(`  Period:         ${new Date(report.periodStartMs).toISOString()} → ${new Date(report.periodEndMs).toISOString()}`);
+  console.log(`  Clean data since: ${report.cleanDataSince}  ← all figures exclude events before this`);
+  console.log(`  Generated:      ${report.generatedAt}`);
   console.log('');
 
   for (const s of report.strategies) {
@@ -26,21 +27,29 @@ async function main(): Promise<void> {
   }
 
   if (report.captureStats.length > 0) {
-    console.log('  ── Capture Telemetry (WO-1)');
-    console.log(`  ${'Strategy'.padEnd(28)} ${'Det'.padStart(6)} ${'Pass'.padStart(5)} ${'SubR'.padStart(6)} ${'IncR'.padStart(6)} ${'Win%'.padStart(5)} ${'Cap%'.padStart(5)} ${'ΔNet'.padStart(7)}`);
+    console.log('  ── Capture Telemetry');
+    console.log(`  ${'Strategy'.padEnd(28)} ${'Det'.padStart(7)} ${'Pass'.padStart(6)} ${'Skip'.padStart(6)} ${'GrossUSD'.padStart(10)} ${'NetUSD'.padStart(9)} ${'MedBps'.padStart(7)} ${'ΔNet'.padStart(7)}`);
     for (const c of report.captureStats) {
-      const pct  = (n: number) => (n * 100).toFixed(0).padStart(5) + '%';
       const delta = c.avgProfitDelta !== null ? `$${c.avgProfitDelta.toFixed(2)}` : 'n/a';
       console.log(
         `  ${c.strategyId.padEnd(28)} ` +
-        `${String(c.detected).padStart(6)} ` +
-        `${String(c.passed).padStart(5)} ` +
-        `${pct(c.submissionRate).padStart(6)} ` +
-        `${pct(c.inclusionRate).padStart(6)} ` +
-        `${pct(c.winRate).padStart(5)} ` +
-        `${pct(c.captureRate).padStart(5)} ` +
+        `${String(c.detected).padStart(7)} ` +
+        `${String(c.passed).padStart(6)} ` +
+        `${String(c.skipped).padStart(6)} ` +
+        `${('$' + c.grossEstimatedProfitUsd.toFixed(2)).padStart(10)} ` +
+        `${('$' + c.netEstimatedProfitUsd.toFixed(2)).padStart(9)} ` +
+        `${String(c.medianSpreadBps).padStart(7)} ` +
         `${delta.padStart(7)}`
       );
+    }
+    if (report.captureStats.some(c => Object.keys(c.skipReasonBreakdown).length > 0)) {
+      console.log('');
+      console.log('  ── Skip reasons');
+      for (const c of report.captureStats) {
+        for (const [reason, count] of Object.entries(c.skipReasonBreakdown).sort((a, b) => b[1] - a[1])) {
+          console.log(`  ${c.strategyId.padEnd(28)}   ${reason.padEnd(28)} ${count}`);
+        }
+      }
     }
     console.log('');
   }

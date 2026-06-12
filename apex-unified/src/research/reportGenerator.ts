@@ -1,53 +1,51 @@
-import { Opportunity, StrategyId } from '../types/Opportunity';
+import { StrategyId }      from '../types/Opportunity';
 import { RunReport, StrategyStats } from '../types/RunReport';
-import { scoreOpportunity }         from './opportunityScorer';
-import { readOpportunities }        from '../core/jsonlLogger';
-import { readCaptureStats }         from '../core/captureTelemetry';
-import CONFIG                       from '../core/config';
-import { getRunContext }             from '../core/runContext';
-import * as fs                      from 'fs';
-import * as path                    from 'path';
+import { readCaptureStats, CaptureStats } from '../core/captureTelemetry';
+import CONFIG               from '../core/config';
+import { getRunContext }    from '../core/runContext';
+import * as fs              from 'fs';
+import * as path            from 'path';
 
 const STRATEGY_IDS: StrategyId[] = [
   'apex.dex_spread', 'apex.triangular', 'grok.cbeth_fair_value', 'apex.aerodrome_spread',
 ];
 
-function buildStats(strategyId: StrategyId, opps: Opportunity[]): StrategyStats {
-  const mine     = opps.filter(o => o.strategyId === strategyId);
-  const accepted = mine.filter(o => !o.rejectionReason);
-  const rejected = mine.filter(o => !!o.rejectionReason);
-
-  const rejBreakdown: Record<string, number> = {};
-  for (const r of rejected) {
-    const key = r.rejectionReason ?? 'unknown';
-    rejBreakdown[key] = (rejBreakdown[key] ?? 0) + 1;
-  }
-
-  const grossTotal = accepted.reduce((s, o) => s + o.grossProfitUsd, 0);
-  const netTotal   = accepted.reduce((s, o) => s + o.netProfitUsd,   0);
-  const bpsArr     = accepted.map(o => o.spreadBps).sort((a, b) => a - b);
-  const median     = bpsArr.length > 0 ? bpsArr[Math.floor(bpsArr.length / 2)] : 0;
-
-  const scored       = accepted.map(scoreOpportunity);
-  const noiseCount   = scored.filter(s => s.classification === 'noise').length;
-  const falsePosPct  = accepted.length > 0 ? noiseCount / accepted.length : 0;
-
+function zeroStats(strategyId: StrategyId): StrategyStats {
   return {
     strategyId,
-    totalScans:            mine.length,          // all logged (accepted + rejected)
-    totalOpportunities:    accepted.length,
-    acceptedOpportunities: accepted.length,
-    rejectedOpportunities: rejected.length,
-    rejectionBreakdown:    rejBreakdown,
-    grossEstimatedProfitUsd: grossTotal,
-    netEstimatedProfitUsd:   netTotal,
-    avgGasCostEth:         0.0003,
-    avgSlippageBps:        accepted.length > 0
-      ? accepted.reduce((s, o) => s + o.slippageEstimate, 0) / accepted.length
-      : 0,
-    medianOpportunityBps:  median,
-    falsePositiveRate:     falsePosPct,
-    expectedValueUsd:      netTotal,
+    totalScans:              0,
+    totalOpportunities:      0,
+    acceptedOpportunities:   0,
+    rejectedOpportunities:   0,
+    rejectionBreakdown:      {},
+    grossEstimatedProfitUsd: 0,
+    netEstimatedProfitUsd:   0,
+    avgGasCostEth:           0.0003,
+    avgSlippageBps:          0,
+    medianOpportunityBps:    0,
+    falsePositiveRate:       0,
+    expectedValueUsd:        0,
+  };
+}
+
+// D2: single source of truth — derive StrategyStats exclusively from capture-*.jsonl
+function buildStatsFromCapture(strategyId: StrategyId, captureArr: CaptureStats[]): StrategyStats {
+  const c = captureArr.find(s => s.strategyId === strategyId);
+  if (!c) return zeroStats(strategyId);
+  return {
+    strategyId,
+    totalScans:              c.detected,
+    totalOpportunities:      c.passed,
+    acceptedOpportunities:   c.passed,
+    rejectedOpportunities:   c.skipped,
+    rejectionBreakdown:      c.skipReasonBreakdown,
+    grossEstimatedProfitUsd: c.grossEstimatedProfitUsd,
+    netEstimatedProfitUsd:   c.netEstimatedProfitUsd,
+    avgGasCostEth:           0.0003,
+    avgSlippageBps:          0,
+    medianOpportunityBps:    c.medianSpreadBps,
+    falsePositiveRate:       c.detected > 0 ? c.skipped / c.detected : 0,
+    expectedValueUsd:        c.netEstimatedProfitUsd,
   };
 }
 
@@ -65,7 +63,7 @@ function liveReadinessScore(stats: StrategyStats[]): { score: number; blockers: 
   else blockers.push(`Too few opportunities (${best.acceptedOpportunities}) — need ≥10`);
 
   if (best.falsePositiveRate < 0.3) score += 20;
-  else blockers.push(`High false-positive rate ${(best.falsePositiveRate * 100).toFixed(0)}% — need <30%`);
+  else blockers.push(`High skip rate ${(best.falsePositiveRate * 100).toFixed(0)}% — need <30%`);
 
   if (best.netEstimatedProfitUsd > 0) score += 20;
   else blockers.push('Negative net profit — costs exceed edge');
@@ -83,44 +81,45 @@ function liveReadinessScore(stats: StrategyStats[]): { score: number; blockers: 
 }
 
 export async function generate72HourReport(): Promise<RunReport> {
-  const ctx  = getRunContext();
-  const now  = Date.now();
-  const all: Opportunity[] = [];
+  const ctx     = getRunContext();
+  const now     = Date.now();
+  const sinceMs = new Date(CONFIG.CLEAN_DATA_SINCE).getTime();
 
-  for (let i = 0; i < 3; i++) {
-    const d = new Date(now - i * 86_400_000).toISOString().slice(0, 10);
-    all.push(...readOpportunities(d));
-  }
-
-  const stats        = STRATEGY_IDS.map(id => buildStats(id, all));
-  const captureStats = readCaptureStats(
-    Array.from({ length: 3 }, (_, i) => new Date(now - i * 86_400_000).toISOString().slice(0, 10))
+  const dates = Array.from({ length: 3 }, (_, i) =>
+    new Date(now - i * 86_400_000).toISOString().slice(0, 10)
   );
+
+  // D2: capture-*.jsonl is the single source of truth for all P&L and scan figures
+  const captureStats = readCaptureStats(dates, sinceMs);
+  const stats        = STRATEGY_IDS.map(id => buildStatsFromCapture(id, captureStats));
 
   const byEV = [...stats].sort((a, b) => b.expectedValueUsd - a.expectedValueUsd);
   const byFP = [...stats].sort((a, b) => a.falsePositiveRate - b.falsePositiveRate);
 
   const { score, blockers } = liveReadinessScore(stats);
 
-  const best  = byEV[0]?.expectedValueUsd  > 0       ? byEV[0].strategyId  : null;
+  const best  = byEV[0]?.expectedValueUsd  > 0              ? byEV[0].strategyId  : null;
   const worst = byFP[byFP.length - 1]?.totalOpportunities > 0 ? byFP[byFP.length - 1].strategyId : null;
 
+  const totalPassed = stats.reduce((s, t) => s + t.acceptedOpportunities, 0);
+
   const report: RunReport = {
-    runId:          ctx.runId,
-    botId:          ctx.botId,
-    generatedAt:    new Date().toISOString(),
-    periodStartMs:  now - 72 * 3_600_000,
-    periodEndMs:    now,
-    durationHours:  72,
-    totalBlocks:    0,
-    strategies:     stats,
+    runId:              ctx.runId,
+    botId:              ctx.botId,
+    generatedAt:        new Date().toISOString(),
+    cleanDataSince:     CONFIG.CLEAN_DATA_SINCE,
+    periodStartMs:      Math.max(now - 72 * 3_600_000, sinceMs),
+    periodEndMs:        now,
+    durationHours:      Math.min(72, (now - sinceMs) / 3_600_000),
+    totalBlocks:        0,
+    strategies:         stats,
     captureStats,
-    bestStrategyId: best,
-    worstStrategyId: worst,
+    bestStrategyId:     best,
+    worstStrategyId:    worst,
     liveReadinessScore: score,
     blockers,
-    summary:        `${all.length} total opportunities across ${STRATEGY_IDS.length} strategies over 72h. ` +
-                    `Live readiness: ${score}/100.`,
+    summary: `${totalPassed} passed opportunities across ${STRATEGY_IDS.length} strategies ` +
+             `since ${CONFIG.CLEAN_DATA_SINCE}. Live readiness: ${score}/100.`,
   };
 
   const outPath = path.resolve(process.cwd(), 'logs', `report-${ctx.runId.slice(0, 8)}.json`);
