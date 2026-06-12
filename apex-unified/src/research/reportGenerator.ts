@@ -2,6 +2,7 @@ import { Opportunity, StrategyId } from '../types/Opportunity';
 import { RunReport, StrategyStats } from '../types/RunReport';
 import { scoreOpportunity }         from './opportunityScorer';
 import { readOpportunities }        from '../core/jsonlLogger';
+import { readCaptureStats }         from '../core/captureTelemetry';
 import CONFIG                       from '../core/config';
 import { getRunContext }             from '../core/runContext';
 import * as fs                      from 'fs';
@@ -91,7 +92,10 @@ export async function generate72HourReport(): Promise<RunReport> {
     all.push(...readOpportunities(d));
   }
 
-  const stats = STRATEGY_IDS.map(id => buildStats(id, all));
+  const stats        = STRATEGY_IDS.map(id => buildStats(id, all));
+  const captureStats = readCaptureStats(
+    Array.from({ length: 3 }, (_, i) => new Date(now - i * 86_400_000).toISOString().slice(0, 10))
+  );
 
   const byEV = [...stats].sort((a, b) => b.expectedValueUsd - a.expectedValueUsd);
   const byFP = [...stats].sort((a, b) => a.falsePositiveRate - b.falsePositiveRate);
@@ -110,6 +114,7 @@ export async function generate72HourReport(): Promise<RunReport> {
     durationHours:  72,
     totalBlocks:    0,
     strategies:     stats,
+    captureStats,
     bestStrategyId: best,
     worstStrategyId: worst,
     liveReadinessScore: score,

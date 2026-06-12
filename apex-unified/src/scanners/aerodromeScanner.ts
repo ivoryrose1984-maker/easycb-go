@@ -2,6 +2,7 @@ import { ethers }           from 'ethers';
 import { AerodromeSignal }  from '../signals/aerodromeSignal';
 import { executeDryRun }    from '../execution/dryRunExecutor';
 import { logSignal, logRejection } from '../core/jsonlLogger';
+import { captureDetected }  from '../core/captureTelemetry';
 import { isKilled }         from '../risk/strategyKillSwitch';
 import { isNewOpportunity } from '../core/dedup';
 import { logger }           from '../core/logger';
@@ -61,12 +62,51 @@ export class AerodromeScanner {
       });
 
       if (!res.opportunity) {
-        logRejection({ strategyId, blockNumber, pair: res.pair, reason: `spread=${res.spreadBps}bps below threshold` });
+        const skipReason = `spread=${res.spreadBps}bps below threshold`;
+        logRejection({ strategyId, blockNumber, pair: res.pair, reason: skipReason });
+        captureDetected({
+          opportunityId: `aero-${res.pair}-${blockNumber}-${res.spreadBps}`,
+          strategyId,
+          block:         blockNumber,
+          path:          res.pair,
+          spreadBps:     res.spreadBps,
+          grossUsd:      0,
+          netUsd:        0,
+          loanSize:      res.loanAmount.toString(),
+          filterResult:  'skip',
+          skipReason,
+        });
         continue;
       }
 
-      if (!isNewOpportunity(res.opportunity.opportunityHash, blockNumber)) continue;
+      if (!isNewOpportunity(res.opportunity.opportunityHash, blockNumber)) {
+        captureDetected({
+          opportunityId: res.opportunity.opportunityHash,
+          strategyId,
+          block:         blockNumber,
+          path:          res.opportunity.route,
+          spreadBps:     res.opportunity.spreadBps,
+          grossUsd:      res.opportunity.grossProfitUsd,
+          netUsd:        res.opportunity.netProfitUsd,
+          loanSize:      res.opportunity.quotedInput,
+          filterResult:  'skip',
+          skipReason:    'dedup_ttl',
+        });
+        continue;
+      }
 
+      captureDetected({
+        opportunityId: res.opportunity.opportunityHash,
+        strategyId,
+        block:         blockNumber,
+        path:          res.opportunity.route,
+        spreadBps:     res.opportunity.spreadBps,
+        grossUsd:      res.opportunity.grossProfitUsd,
+        netUsd:        res.opportunity.netProfitUsd,
+        loanSize:      res.opportunity.quotedInput,
+        filterResult:  'pass',
+        skipReason:    null,
+      });
       executeDryRun(res.opportunity);
       opportunities.push(res.opportunity);
     }

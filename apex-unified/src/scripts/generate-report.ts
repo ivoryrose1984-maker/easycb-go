@@ -25,6 +25,26 @@ async function main(): Promise<void> {
     console.log('');
   }
 
+  if (report.captureStats.length > 0) {
+    console.log('  ── Capture Telemetry (WO-1)');
+    console.log(`  ${'Strategy'.padEnd(28)} ${'Det'.padStart(6)} ${'Pass'.padStart(5)} ${'SubR'.padStart(6)} ${'IncR'.padStart(6)} ${'Win%'.padStart(5)} ${'Cap%'.padStart(5)} ${'ΔNet'.padStart(7)}`);
+    for (const c of report.captureStats) {
+      const pct  = (n: number) => (n * 100).toFixed(0).padStart(5) + '%';
+      const delta = c.avgProfitDelta !== null ? `$${c.avgProfitDelta.toFixed(2)}` : 'n/a';
+      console.log(
+        `  ${c.strategyId.padEnd(28)} ` +
+        `${String(c.detected).padStart(6)} ` +
+        `${String(c.passed).padStart(5)} ` +
+        `${pct(c.submissionRate).padStart(6)} ` +
+        `${pct(c.inclusionRate).padStart(6)} ` +
+        `${pct(c.winRate).padStart(5)} ` +
+        `${pct(c.captureRate).padStart(5)} ` +
+        `${delta.padStart(7)}`
+      );
+    }
+    console.log('');
+  }
+
   console.log(`  Best strategy:     ${report.bestStrategyId ?? 'none'}`);
   console.log(`  Live readiness:    ${report.liveReadinessScore}/100`);
 

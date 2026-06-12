@@ -2,6 +2,7 @@ import { ethers }              from 'ethers';
 import { CbEthFairValueSignal } from '../signals/cbETHFairValueSignal';
 import { executeDryRun }        from '../execution/dryRunExecutor';
 import { logSignal, logRejection } from '../core/jsonlLogger';
+import { captureDetected }      from '../core/captureTelemetry';
 import { isKilled }             from '../risk/strategyKillSwitch';
 import { logger }               from '../core/logger';
 import { isNewOpportunity }     from '../core/dedup';
@@ -40,21 +41,58 @@ export class CbEthFairValueScanner {
     });
 
     if (!result.opportunity) {
+      const skipReason = 'below_threshold';
       logRejection({
         strategyId,
         blockNumber,
         grossEdgeBps: result.grossEdgeBps,
         netEdgeBps:   result.netEdgeBps,
-        reason:       result.opportunity === null ? 'below_threshold' : 'no_signal',
+        reason:       skipReason,
+      });
+      captureDetected({
+        opportunityId: `cbeth-${blockNumber}`,
+        strategyId,
+        block:         blockNumber,
+        path:          'cbETH/ETH',
+        spreadBps:     result.grossEdgeBps,
+        grossUsd:      0,
+        netUsd:        0,
+        loanSize:      '0',
+        filterResult:  'skip',
+        skipReason,
       });
       return { strategyId, scanned: 1, opportunities: [], errors: 0, durationMs };
     }
 
     if (!isNewOpportunity(result.opportunity.opportunityHash, blockNumber)) {
       logger.debug('cbETH', `Duplicate opp ${result.opportunity.opportunityHash} — skipped`);
+      captureDetected({
+        opportunityId: result.opportunity.opportunityHash,
+        strategyId,
+        block:         blockNumber,
+        path:          result.opportunity.route,
+        spreadBps:     result.opportunity.spreadBps,
+        grossUsd:      result.opportunity.grossProfitUsd,
+        netUsd:        result.opportunity.netProfitUsd,
+        loanSize:      result.opportunity.quotedInput,
+        filterResult:  'skip',
+        skipReason:    'dedup_ttl',
+      });
       return { strategyId, scanned: 1, opportunities: [], errors: 0, durationMs };
     }
 
+    captureDetected({
+      opportunityId: result.opportunity.opportunityHash,
+      strategyId,
+      block:         blockNumber,
+      path:          result.opportunity.route,
+      spreadBps:     result.opportunity.spreadBps,
+      grossUsd:      result.opportunity.grossProfitUsd,
+      netUsd:        result.opportunity.netProfitUsd,
+      loanSize:      result.opportunity.quotedInput,
+      filterResult:  'pass',
+      skipReason:    null,
+    });
     executeDryRun(result.opportunity);
 
     return {

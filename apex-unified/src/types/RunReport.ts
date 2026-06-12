@@ -1,4 +1,7 @@
 import { StrategyId } from './Opportunity';
+import { CaptureStats } from '../core/captureTelemetry';
+
+export { CaptureStats };
 
 export interface StrategyStats {
   strategyId:          StrategyId;
@@ -25,9 +28,10 @@ export interface RunReport {
   durationHours:      number;
   totalBlocks:        number;
   strategies:         StrategyStats[];
+  captureStats:       CaptureStats[];   // WO-1: per-strategy lifecycle telemetry
   bestStrategyId:     StrategyId | null;
   worstStrategyId:    StrategyId | null;
-  liveReadinessScore: number;     // 0–100
+  liveReadinessScore: number;           // 0–100
   blockers:           string[];
   summary:            string;
 }

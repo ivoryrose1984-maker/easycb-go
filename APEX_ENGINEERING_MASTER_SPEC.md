@@ -103,3 +103,11 @@ npm run review: reads WO-1 telemetry for trailing 7 and 28 days → per-strategy
 - No profit claims in any external material without live telemetry behind them
 - No new strategy goes live without 1 week of dry-run telemetry + fork test
 - No silent catches; no divergent profit-math paths; no hardcoded pairs after WO-2
+
+---
+
+# PART VI — ETHICAL CEILING (non-negotiable, audited in every code review)
+
+**Approved mechanics:** back-run/atomic arbitrage, cross-DEX routing, protocol liquidations, LST fair-value reversion. These tighten spreads, support lending solvency, and harm no individual user.
+
+**Prohibited permanently:** sandwiching, front-running, or any strategy whose profit derives from degrading a specific user's execution. Technically irrelevant on Base (no public mempool) and ethically incompatible with this project's mission regardless of chain. Any future code path resembling these is rejected at review.
