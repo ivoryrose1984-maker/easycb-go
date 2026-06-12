@@ -10,7 +10,8 @@
     "replay":         "npm run build && node dist/scripts/replay.js",
     "compile":        "mkdir -p compiled && npx solc@0.8.19 --bin --abi --optimize --optimize-runs 200 --output-dir compiled src/contracts/ApexFlashLoan.sol",
     "deploy":         "npm run build && npm run compile && node dist/scripts/deploy-contract.js",
-    "test":           "jest --runInBand"
+    "test":           "jest --runInBand",
+    "verify":         "npm run build && npm test && npm run report"
   },
   "dependencies": {
     "@supabase/supabase-js":              "^2.39.0",

@@ -70,78 +70,75 @@ npm run report
 | cbBTC  | 8        | same as USDC probe  | not converted (todo)    |
 | AERO   | 18       | same as USDC probe  | not converted           |
 
-## Magic Numbers Table
+## Magic Numbers — Status
 
-| File                        | Line | Value              | Should be                    |
-|-----------------------------|------|--------------------|------------------------------|
-| dexSpreadSignal.ts          | 297  | `0.001` (hardcoded)| `CONFIG.FLASH_LOAN_FEE_BPS/10000` |
-| cbETHFairValueSignal.ts     | 167  | `5` (slippage bps) | `CONFIG.LATENCY_BUFFER_BPS`  |
-| cbETHFairValueSignal.ts     | 167  | `10` (safety buf)  | `2 × CONFIG.LATENCY_BUFFER_BPS` (CLAUDE.md says 10bps) |
-| cbETHFairValueSignal.ts     | 167  | `5` (revert res)   | `CONFIG.FAILURE_BUFFER_BPS`  |
-| cbETHFairValueSignal.ts     | 164  | `0.0003` (gasEth)  | derive from gasForecaster    |
-| dexSpreadSignal.ts          | 299  | `250, 10` (slip)   | config or named constant     |
-| dry-run.ts                  | 199  | `50` (log interval)| named constant               |
+| File                        | Value              | Status   | Replaced with                          |
+|-----------------------------|--------------------| ---------|----------------------------------------|
+| dexSpreadSignal.ts          | `0.001` flash fee  | FIXED P1 | `CONFIG.FLASH_LOAN_FEE_BPS / 10_000`  |
+| cbETHFairValueSignal.ts     | `0.0005` flash fee | FIXED P4 | `CONFIG.FLASH_LOAN_FEE_BPS / 10_000`  |
+| aerodromeSignal.ts          | `0.001` flash fee  | FIXED P5 | `CONFIG.FLASH_LOAN_FEE_BPS / 10_000`  |
+| triangularArbSignal.ts      | `0.0015` flash fee | FIXED P5 | `CONFIG.FLASH_LOAN_FEE_BPS / 10_000`  |
+| cbETHFairValueSignal.ts     | `10+5` bps buffers | FIXED P4 | `CONFIG.LATENCY_BUFFER_BPS + FAILURE_BUFFER_BPS` |
+| cbETHFairValueSignal.ts     | `0.0003` gas ETH   | OPEN     | derive from gasForecaster (future)     |
+| dexSpreadSignal.ts          | `250, 10` slippage | OPEN     | named constant (future)                |
 
 ---
 
 ## Bug Ledger
 
-### BUG-01: Anomaly spreads counted as skips (Phase 1)
-- **File**: `dexSpreadSignal.ts`, `apexPairScanner.ts`, `captureTelemetry.ts`
-- **Symptom**: USDbC/WETH=-7828bps, DAI/WETH=-9577bps, USDC/cbETH=-9261bps, etc. tagged as `filter_result:"skip"`, inflating skip counts and polluting skip-reason breakdown + median-bps
-- **Root cause**: No sanity gate on spread magnitude; thin/absent pool liquidity causes near-zero quotes → valid-but-meaningless negative spread
-- **Fix**: Gate at |spreadBpsProbe|>2000bps → `filter_result:"anomaly"`, distinct from skip
-- **Commit**: Phase 1
+### BUG-01: Anomaly spreads counted as skips — FIXED Phase 1
+- **Files**: `dexSpreadSignal.ts`, `apexPairScanner.ts`, `captureTelemetry.ts`
+- **Symptom**: USDbC/WETH=-7828bps, DAI/WETH=-9577bps etc. tagged as `filter_result:"skip"`, inflating skip counts and polluting skip-reason breakdown and median-bps
+- **Root cause**: No sanity gate; thin/absent pool liquidity → near-zero quotes → valid-but-meaningless negative spread
+- **Fix**: Gate at |spread|>2000bps → `filter_result:"anomaly"`, separate from intentional skips
+- **Test**: `capture.test.ts` — anomaly accounting (3 tests)
 
-### BUG-02: netProfitUsd deducts phantom 10bps flash loan fee (Phase 1)
-- **File**: `dexSpreadSignal.ts:297`
-- **Symptom**: `grossUsd * 0.001` deducted even though Balancer flash loans are free (`FLASH_LOAN_FEE_BPS=0`)
-- **Root cause**: Hardcoded `0.001` instead of `CONFIG.FLASH_LOAN_FEE_BPS / 10_000`
-- **Fix**: Replace with config-derived value
-- **Commit**: Phase 1
+### BUG-02: netProfitUsd deducts phantom flash loan fee — FIXED Phase 1/4/5
+- **Files**: `dexSpreadSignal.ts` (P1), `cbETHFairValueSignal.ts` (P4), `aerodromeSignal.ts` (P5), `triangularArbSignal.ts` (P5)
+- **Symptom**: `grossUsd * 0.001` (or 0.0005/0.0015) deducted even though Balancer flash loans are free
+- **Root cause**: Hardcoded fee fraction instead of `CONFIG.FLASH_LOAN_FEE_BPS / 10_000`
+- **Fix**: All four signals now use config-derived value (= 0)
+- **Test**: `math.test.ts` — "all four signals use the same flash loan fee formula"
 
-### BUG-03: unhandledRejection → process.exit(1) too aggressive (Phase 2)
-- **File**: `dry-run.ts:30-33`
-- **Symptom**: Any background async error (CEX feed reconnect, gas forecaster, timer callbacks) kills the process; contributes to PM2 restart count
-- **Root cause**: Catch-all rejection handler always exits
-- **Fix**: Log full stack, attempt graceful shutdown; exit only on truly unknown/fatal rejections
-- **Commit**: Phase 2
+### BUG-03: unhandledRejection → process.exit(1) too aggressive — FIXED Phase 2
+- **File**: `dry-run.ts`
+- **Symptom**: Any background async error (CEX feed reconnect, timer callbacks) kills the process; contributed to 217 PM2 restarts
+- **Root cause**: Catch-all rejection handler unconditionally exited
+- **Fix**: Log full stack and continue; exit only on `uncaughtException` (synchronous crash)
 
-### BUG-04: ENABLE_BINANCE defaults true despite Hetzner geo-block (Phase 3)
+### BUG-04: ENABLE_BINANCE defaults true despite Hetzner geo-block — FIXED Phase 3
 - **File**: `config.ts`
 - **Symptom**: `[CEX] Binance geo-blocked (HTTP 451)` on every reconnect; useless retry spam
-- **Root cause**: `flag('ENABLE_BINANCE', true)` — should default false
-- **Fix**: `flag('ENABLE_BINANCE', false)`; guard `getCexFeed()` behind flag
-- **Commit**: Phase 3
+- **Root cause**: `flag('ENABLE_BINANCE', true)`
+- **Fix**: Default false; guard `getCexFeed()` behind the flag
 
-### BUG-05: Telegram chat_id not validated at startup (Phase 3)
+### BUG-05: Telegram chat_id not validated at startup — FIXED Phase 3
 - **File**: `telegramAlert.ts`
-- **Symptom**: Bad chat_id discovered only at send time; logs one error per message for hours
-- **Root cause**: `getMe()` validates bot token only, not chat_id
-- **Fix**: Send probe message at startup; on failure disable and log WARN once
-- **Commit**: Phase 3
+- **Symptom**: Bad chat_id discovered only at send time, error logged per message
+- **Root cause**: `getMe()` validates bot token only, not the chat_id
+- **Fix**: Send probe message at startup; on failure disable all alerts and log WARN once
 
-### BUG-06: Disabled strategies indistinguishable from broken in report (Phase 4)
-- **File**: `reportGenerator.ts`, `generate-report.ts`
-- **Symptom**: aerodrome_spread shows 0/0 scans — looks identical to "no opportunities" or "erroring silently"
-- **Root cause**: No report-time check of enable flags
-- **Fix**: Mark strategies with 0 detected AND enable flag false as `DISABLED(reason)`
-- **Commit**: Phase 4
+### BUG-06: Disabled strategies indistinguishable from broken in report — FIXED Phase 4
+- **Files**: `reportGenerator.ts`, `generate-report.ts`, `RunReport.ts`
+- **Symptom**: `apex.aerodrome_spread` shows 0/0 scans — looks identical to "erroring silently"
+- **Root cause**: No report-time check of `ENABLE_*` flags
+- **Fix**: `StrategyStats.disabled` field set when flag is false; report shows `[DISABLED: FLAG=false]`
 
-### BUG-07: cbETH cost model uses magic numbers instead of config (Phase 4)
+### BUG-07: cbETH cost model magic numbers — FIXED Phase 4
 - **File**: `cbETHFairValueSignal.ts:167`
-- **Symptom**: `10` and `5` bps buffers not traceable to any config value
-- **Root cause**: Hardcoded constants; safe (correct values match CLAUDE.md spec) but unmaintainable
-- **Fix**: Named constants referencing CONFIG
-- **Commit**: Phase 4
-
-### BUG-08: Dead import readOpportunities in reportGenerator (Phase 5)
-- **File**: `reportGenerator.ts`
-- **Symptom**: Unused import lingers after WO-3 cleanup
-- **Root cause**: Import not removed when buildStats() was deleted
-- **Fix**: Remove import
-- **Commit**: Phase 5
+- **Symptom**: `+ 10 + 5` bps buffer constants not traceable to any config value
+- **Root cause**: Hardcoded; correct values match spec but unmaintainable
+- **Fix**: `CONFIG.LATENCY_BUFFER_BPS + CONFIG.FAILURE_BUFFER_BPS`
+- **Test**: `math.test.ts` — "totalCosts uses named config buffers"
 
 ---
 
-*Last updated: Phase 0 — recon only, no code changes*
+## npm audit status (Phase 6)
+
+11 vulnerabilities (9 moderate, 2 critical) in `ethers`'s bundled `ws` package (GHSA-58qx-3vcg-4xpx).
+Fix requires `--force` which downgrades to ethers@5 — a breaking API change. No action taken.
+Tracked; will reassess when ethers v6 ships a patched ws version.
+
+---
+
+*Last updated: Phase 6 complete — all 84 tests passing, TypeScript clean*
