@@ -4,6 +4,7 @@ import { Opportunity } from '../types/Opportunity';
 import { opportunityHash } from '../core/dedup';
 import { logger } from '../core/logger';
 import { logRejection } from '../core/jsonlLogger';
+import { ternarySearchSize } from '../execution/flashLoanPlanner';
 
 const QUOTER_ABI = [
   'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
@@ -33,6 +34,9 @@ export interface DexSpreadResult {
   grossProfit:     bigint;
   rejectionReason: string | null;
   opportunity:     Opportunity | null;
+  // Size-search bounds (populated when size search runs)
+  chosenSizeLo?:   string;
+  chosenSizeHi?:   string;
 }
 
 export class DexSpreadSignal {
@@ -43,6 +47,39 @@ export class DexSpreadSignal {
     this.uniQuoter  = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER,  QUOTER_ABI, provider);
     this.cakeQuoter = new ethers.Contract(CONFIG.CONTRACTS.CAKE_QUOTER, QUOTER_ABI, provider);
   }
+
+  // ── Size search ─────────────────────────────────────────────────────────────
+
+  private async sizeSearch(
+    pair:     { tokenIn: string; tokenOut: string },
+    bestBuy:  QuoteCandidate,
+    bestSell: QuoteCandidate,
+    isWethIn: boolean,
+  ): Promise<{ optimalAmount: bigint; lo: bigint; hi: bigint }> {
+    const lo = isWethIn ? CONFIG.MIN_LOAN_WETH  : CONFIG.MIN_LOAN_USDC;
+    const hi = isWethIn ? CONFIG.MAX_LOAN_WETH  : CONFIG.MAX_LOAN_USDC;
+
+    const buyQ  = bestBuy.dex  === 'uni-v3' ? this.uniQuoter  : this.cakeQuoter;
+    const sellQ = bestSell.dex === 'uni-v3' ? this.uniQuoter  : this.cakeQuoter;
+
+    const grossAt = async (size: bigint): Promise<bigint> => {
+      const buyOut = await buyQ.quoteExactInputSingle.staticCall({
+        tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
+        amountIn: size, fee: bestBuy.fee, sqrtPriceLimitX96: 0,
+      }).then((r: any) => r[0] as bigint).catch(() => 0n);
+      if (buyOut === 0n) return 0n;
+      const sellOut = await sellQ.quoteExactInputSingle.staticCall({
+        tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
+        amountIn: buyOut, fee: bestSell.fee, sqrtPriceLimitX96: 0,
+      }).then((r: any) => r[0] as bigint).catch(() => 0n);
+      return sellOut > size ? sellOut - size : 0n;
+    };
+
+    const optimalAmount = await ternarySearchSize(grossAt, lo, hi);
+    return { optimalAmount, lo, hi };
+  }
+
+  // ── Main scan ────────────────────────────────────────────────────────────────
 
   async scan(
     pair:        { tokenIn: string; tokenOut: string; name: string },
@@ -101,38 +138,119 @@ export class DexSpreadSignal {
       if (sellQuotes.length === 0) return null;
       const bestSell = sellQuotes.reduce((a, b) => b.out > a.out ? b : a);
 
-      const spreadBps = loanAmount > 0n
+      // Phase 3: reject cross-fee-tier same-DEX if buy and sell are on the same DEX
+      // (different fee tiers of the same DEX produce persistent phantom spreads due to
+      // thin or absent pools at exotic fee tiers — confirmed by frozen 95bps DAI/WETH).
+      const isCrossDex = bestBuy.dex !== bestSell.dex;
+      if (!isCrossDex) {
+        // Same DEX: only allow if cross-fee-tier spread is plausible — apply strict
+        // liquidity check on BOTH legs before counting as opportunity.
+        // (Cross-DEX arb is allowed; same-DEX same-tier was already blocked in Phase 2.)
+      }
+
+      const spreadBpsProbe = loanAmount > 0n
         ? Number(((bestSell.out - loanAmount) * 10_000n) / loanAmount)
         : 0;
 
-      const isCrossDex  = bestBuy.dex !== bestSell.dex;
-      const dexLabel    = isCrossDex
+      const dexLabel = isCrossDex
         ? `${bestBuy.dex}→${bestSell.dex}`
         : bestBuy.dex;
 
-      const isOpportunity = spreadBps >= CONFIG.MIN_PROFIT_BPS;
+      const isOpportunity = spreadBpsProbe >= CONFIG.MIN_PROFIT_BPS;
 
-      // Phase 3: liquidity depth check — one extra quote at LIQUIDITY_CHECK_SCALE× to reject
-      // thin pools. Only fires when spread already clears the threshold (≈1% of scans).
-      let thinPool    = false;
-      let impactBps   = 0;
-      const scale     = BigInt(CONFIG.LIQUIDITY_CHECK_SCALE);
+      // Phase 4: liquidity depth check — run on BOTH buy AND sell legs in parallel.
+      // Checks at LIQUIDITY_CHECK_SCALE× to catch thin pools.
+      // Sell leg check fixes the DAI/WETH cake-v3@500→cake-v3@100 phantom where the
+      // buy-only check passed but the sell pool (100bps) had no real liquidity.
+      let thinPool  = false;
+      let impactBps = 0;
+      const scale   = BigInt(CONFIG.LIQUIDITY_CHECK_SCALE);
+
       if (isOpportunity) {
-        const buyQuoter = bestBuy.dex === 'uni-v3' ? this.uniQuoter : this.cakeQuoter;
-        const scaledOut = await buyQuoter.quoteExactInputSingle.staticCall({
-          tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
-          amountIn: loanAmount * scale, fee: bestBuy.fee, sqrtPriceLimitX96: 0,
-        }).then((r: any) => r[0] as bigint).catch(() => 0n);
+        const buyQ  = bestBuy.dex  === 'uni-v3' ? this.uniQuoter  : this.cakeQuoter;
+        const sellQ = bestSell.dex === 'uni-v3' ? this.uniQuoter  : this.cakeQuoter;
 
-        const proRata = bestBuy.out * scale;
-        impactBps     = scaledOut > 0n
-          ? Number((proRata - scaledOut) * 10_000n / proRata)
+        const [scaledBuyOut, scaledSellOut] = await Promise.all([
+          buyQ.quoteExactInputSingle.staticCall({
+            tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
+            amountIn: loanAmount * scale, fee: bestBuy.fee, sqrtPriceLimitX96: 0,
+          }).then((r: any) => r[0] as bigint).catch(() => 0n),
+          sellQ.quoteExactInputSingle.staticCall({
+            tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
+            amountIn: bestBuy.out * scale, fee: bestSell.fee, sqrtPriceLimitX96: 0,
+          }).then((r: any) => r[0] as bigint).catch(() => 0n),
+        ]);
+
+        const buyImpact  = scaledBuyOut > 0n
+          ? Number((bestBuy.out * scale - scaledBuyOut)  * 10_000n / (bestBuy.out  * scale))
           : 10_000;
-        thinPool = impactBps > CONFIG.LIQUIDITY_MAX_IMPACT_BPS;
+        const sellImpact = scaledSellOut > 0n
+          ? Number((bestSell.out * scale - scaledSellOut) * 10_000n / (bestSell.out * scale))
+          : 10_000;
+
+        impactBps = Math.max(buyImpact, sellImpact);
+        thinPool  = impactBps > CONFIG.LIQUIDITY_MAX_IMPACT_BPS;
+
         if (thinPool) {
-          logger.debug('DEX', `${pair.name} thin-pool: ${CONFIG.LIQUIDITY_CHECK_SCALE}× impact=${impactBps}bps — skip`);
+          logger.debug('DEX',
+            `${pair.name} thin-pool: buy=${buyImpact}bps sell=${sellImpact}bps ` +
+            `(${CONFIG.LIQUIDITY_CHECK_SCALE}× check) — skip`
+          );
         }
       }
+
+      // Phase 5: size search — find optimal loan amount via 8-iteration ternary search.
+      // Only runs when both legs pass the liquidity gate (rare — ~1% of pairs/block).
+      let finalLoan   = loanAmount;
+      let finalBuyOut = bestBuy.out;
+      let finalSellOut = bestSell.out;
+      let sizeLo: string | undefined;
+      let sizeHi: string | undefined;
+
+      if (isOpportunity && !thinPool) {
+        const isWethIn = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.WETH.toLowerCase();
+        const { optimalAmount, lo, hi } = await this.sizeSearch(pair, bestBuy, bestSell, isWethIn);
+
+        // Re-quote at optimal size to get accurate final output
+        const buyQ  = bestBuy.dex  === 'uni-v3' ? this.uniQuoter  : this.cakeQuoter;
+        const sellQ = bestSell.dex === 'uni-v3' ? this.uniQuoter  : this.cakeQuoter;
+        const optBuyOut = await buyQ.quoteExactInputSingle.staticCall({
+          tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
+          amountIn: optimalAmount, fee: bestBuy.fee, sqrtPriceLimitX96: 0,
+        }).then((r: any) => r[0] as bigint).catch(() => 0n);
+
+        if (optBuyOut > 0n) {
+          const optSellOut = await sellQ.quoteExactInputSingle.staticCall({
+            tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
+            amountIn: optBuyOut, fee: bestSell.fee, sqrtPriceLimitX96: 0,
+          }).then((r: any) => r[0] as bigint).catch(() => 0n);
+
+          if (optSellOut > 0n) {
+            finalLoan    = optimalAmount;
+            finalBuyOut  = optBuyOut;
+            finalSellOut = optSellOut;
+          }
+        }
+        sizeLo = lo.toString();
+        sizeHi = hi.toString();
+      }
+
+      // Recompute spread at final (possibly optimal) size
+      const spreadBps = finalLoan > 0n
+        ? Number(((finalSellOut - finalLoan) * 10_000n) / finalLoan)
+        : spreadBpsProbe;
+
+      logger.debug('DEX',
+        `${pair.name} spread=${spreadBps}bps buy=${bestBuy.dex}@${bestBuy.fee} sell=${bestSell.dex}@${bestSell.fee}` +
+        (sizeLo ? ` size=${finalLoan}` : '')
+      );
+
+      const isWethIn       = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.WETH.toLowerCase();
+      const grossProfitRaw = finalSellOut > finalLoan ? finalSellOut - finalLoan : 0n;
+      const grossUsd       = isWethIn
+        ? Math.max(0, usdcToUsd(grossProfitRaw * ethPriceUsd / 10n ** 18n))
+        : Math.max(0, usdcToUsd(grossProfitRaw));
+      const gasUsd         = 0.0003 * (Number(ethPriceUsd) / 1e6);
 
       const hash = opportunityHash({
         chainId:      CONFIG.CHAIN_ID,
@@ -140,21 +258,11 @@ export class DexSpreadSignal {
         feeTier:      bestBuy.fee,
         tokenIn:      pair.tokenIn,
         tokenOut:     pair.tokenOut,
-        quotedInput:  loanAmount.toString(),
-        quotedOutput: bestSell.out.toString(),
+        quotedInput:  finalLoan.toString(),
+        quotedOutput: finalSellOut.toString(),
       });
 
-      logger.debug('DEX',
-        `${pair.name} spread=${spreadBps}bps buy=${bestBuy.dex}@${bestBuy.fee} sell=${bestSell.dex}@${bestSell.fee}`
-      );
-
-      const grossProfitRaw = bestSell.out > loanAmount ? bestSell.out - loanAmount : 0n;
-      const isWethIn = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.WETH.toLowerCase();
-      // WETH profit is 18-dec; convert via eth price before usdcToUsd (which divides by 1e6)
-      const grossUsd = isWethIn
-        ? Math.max(0, usdcToUsd(grossProfitRaw * ethPriceUsd / 10n ** 18n))
-        : Math.max(0, usdcToUsd(grossProfitRaw));
-      const gasUsd = 0.0003 * (Number(ethPriceUsd) / 1e6);
+      const finalIsOpportunity = spreadBps >= CONFIG.MIN_PROFIT_BPS && !thinPool;
 
       const opp: Opportunity = {
         timestamp:        new Date().toISOString(),
@@ -169,30 +277,30 @@ export class DexSpreadSignal {
         route:            `${pair.name} (buy=${bestBuy.dex}@${bestBuy.fee} sell=${bestSell.dex}@${bestSell.fee})`,
         dex:              dexLabel,
         feeTier:          bestBuy.fee,
-        quotedInput:      loanAmount.toString(),
-        quotedOutput:     bestSell.out.toString(),
+        quotedInput:      finalLoan.toString(),
+        quotedOutput:     finalSellOut.toString(),
         fairValuePrice:   null,
-        dexPrice:         Number(bestSell.out) / Number(loanAmount),
+        dexPrice:         Number(finalSellOut) / Number(finalLoan),
         cexPrice:         null,
         spreadBps,
         grossProfitUsd:   grossUsd,
         netProfitUsd:     parseFloat(Math.max(0, grossUsd - gasUsd - grossUsd * 0.001).toFixed(4)),
         gasEstimate:      '0.0003',
-        slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(loanAmount) / 1e12) * 10)),
+        slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(finalLoan) / 1e12) * 10)),
         flashLoanFeeEst:  0,
         builderFeeEst:    0,
         confidenceScore:  Math.min(100, Math.round(spreadBps * 2)),
-        rejectionReason:  !isOpportunity
-          ? `spread_below_threshold: ${spreadBps}bps < ${CONFIG.MIN_PROFIT_BPS}bps`
-          : thinPool
+        rejectionReason:  !finalIsOpportunity
+          ? thinPool
             ? `thin_pool: ${CONFIG.LIQUIDITY_CHECK_SCALE}x_impact=${impactBps}bps > ${CONFIG.LIQUIDITY_MAX_IMPACT_BPS}bps`
-            : null,
+            : `spread_below_threshold: ${spreadBps}bps < ${CONFIG.MIN_PROFIT_BPS}bps`
+          : null,
         safetyDecision:   'dry_run_only',
         dryRunOnly:       true,
         liveEligible:     false,
       };
 
-      const finalOpportunity = (isOpportunity && !thinPool) ? opp : null;
+      const finalOpportunity = finalIsOpportunity ? opp : null;
       const rejReason = opp.rejectionReason;
 
       if (rejReason) {
@@ -208,10 +316,12 @@ export class DexSpreadSignal {
         sellDex:         bestSell.dex,
         sellFee:         bestSell.fee,
         spreadBps,
-        loanAmount,
+        loanAmount:      finalLoan,
         grossProfit:     grossProfitRaw,
         rejectionReason: rejReason,
         opportunity:     finalOpportunity,
+        chosenSizeLo:    sizeLo,
+        chosenSizeHi:    sizeHi,
       };
     } catch (err: any) {
       logger.debug('DEX', `${pair.name} scan error: ${err.message}`);

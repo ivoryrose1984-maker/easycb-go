@@ -113,6 +113,8 @@ export class ApexPairScanner {
         loanSize:      res.opportunity.quotedInput,
         filterResult:  'pass',
         skipReason:    null,
+        chosenSizeLo:  res.chosenSizeLo,
+        chosenSizeHi:  res.chosenSizeHi,
       });
       executeDryRun(res.opportunity);
       opportunities.push(res.opportunity);

@@ -16,16 +16,19 @@ export type Outcome = 'LANDED_PROFIT' | 'LANDED_LOSS' | 'REVERTED' | 'NOT_INCLUD
 // ── Event parameter shapes ────────────────────────────────────────────────────
 
 export interface DetectParams {
-  opportunityId: string;
-  strategyId:    string;
-  block:         number;
-  path:          string;
-  spreadBps:     number;
-  grossUsd:      number;
-  netUsd:        number;
-  loanSize:      string;
-  filterResult:  FilterResult;
-  skipReason:    string | null;
+  opportunityId:  string;
+  strategyId:     string;
+  block:          number;
+  path:           string;
+  spreadBps:      number;
+  grossUsd:       number;
+  netUsd:         number;
+  loanSize:       string;
+  filterResult:   FilterResult;
+  skipReason:     string | null;
+  // Size-search bounds (dex_spread only; absent for fixed-size strategies)
+  chosenSizeLo?:  string;
+  chosenSizeHi?:  string;
 }
 
 export interface SubmitParams {
@@ -109,6 +112,8 @@ export function captureDetected(p: DetectParams): void {
     loan_size:          p.loanSize,
     filter_result:      p.filterResult,
     skip_reason:        p.skipReason,
+    ...(p.chosenSizeLo !== undefined && { chosen_size_lo: p.chosenSizeLo }),
+    ...(p.chosenSizeHi !== undefined && { chosen_size_hi: p.chosenSizeHi }),
   }));
   scheduleDrain();
 }

@@ -13,6 +13,7 @@ import { AerodromeScanner }        from '../scanners/aerodromeScanner';
 import { checkCircuitBreaker, setInitialBalance } from '../risk/circuitBreaker';
 import { acquireLock }             from '../risk/networkMutex';
 import { FastPathExecutor }        from '../execution/FastPathExecutor';
+import { getHttpProvider }         from '../infrastructure/fallbackProvider';
 import { ethers }                  from 'ethers';
 
 const APEX_ABI = [
@@ -56,13 +57,17 @@ interface BotContext {
 }
 
 function buildContext(p: ethers.WebSocketProvider): BotContext {
+  // Route all RPC reads (quotes, Chainlink calls) through the HTTP FallbackProvider when
+  // BASE_HTTPS_URL(S) is configured, so a WebSocket stall doesn't blind quoting.
+  // Falls back to the WSS provider transparently if no HTTP URL is set.
+  const http: ethers.Provider = getHttpProvider() ?? p;
   return {
     provider:     p,
-    quoter:       new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER, QUOTER_ABI, p),
-    cbethScanner: CONFIG.ENABLE_CBETH_SIGNAL       ? new CbEthFairValueScanner(p)  : null,
-    pairScanner:  CONFIG.ENABLE_DEX_SPREAD_SIGNAL   ? new ApexPairScanner(p)        : null,
-    triScanner:   CONFIG.ENABLE_TRIANGULAR_SIGNAL   ? new ApexTriangularScanner(p)  : null,
-    aeroScanner:  CONFIG.ENABLE_AERODROME_SIGNAL    ? new AerodromeScanner(p)       : null,
+    quoter:       new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER, QUOTER_ABI, http),
+    cbethScanner: CONFIG.ENABLE_CBETH_SIGNAL       ? new CbEthFairValueScanner(http) : null,
+    pairScanner:  CONFIG.ENABLE_DEX_SPREAD_SIGNAL   ? new ApexPairScanner(http)       : null,
+    triScanner:   CONFIG.ENABLE_TRIANGULAR_SIGNAL   ? new ApexTriangularScanner(http) : null,
+    aeroScanner:  CONFIG.ENABLE_AERODROME_SIGNAL    ? new AerodromeScanner(http)      : null,
   };
 }
 
@@ -180,7 +185,7 @@ async function main(): Promise<void> {
       const ethPrice = await getEthPrice();
 
       const [cbethResult, pairResult, triResult, aeroResult] = await Promise.all([
-        ctx.cbethScanner?.scan(ctx.provider, blockNum) ?? Promise.resolve(null),
+        ctx.cbethScanner?.scan(getHttpProvider() ?? ctx.provider, blockNum) ?? Promise.resolve(null),
         ctx.pairScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
         ctx.triScanner?.scan(blockNum, ethPrice)       ?? Promise.resolve(null),
         ctx.aeroScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),

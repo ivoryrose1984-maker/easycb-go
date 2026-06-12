@@ -97,6 +97,25 @@ export function buildExecutionPlan(
   };
 }
 
+// 8-iteration ternary search maximising a bigint objective over [lo, hi].
+// Returns the midpoint of the final bracket — converges to within 1/3^8 ≈ 0.015% of range.
+export async function ternarySearchSize(
+  fn:    (size: bigint) => Promise<bigint>,
+  lo:    bigint,
+  hi:    bigint,
+  iters: number = CONFIG.MAX_TERNARY_ITERS,
+): Promise<bigint> {
+  let left = lo, right = hi;
+  for (let i = 0; i < iters; i++) {
+    const m1 = left + (right - left) / 3n;
+    const m2 = right - (right - left) / 3n;
+    const [v1, v2] = await Promise.all([fn(m1), fn(m2)]);
+    if (v1 > v2) right = m2;
+    else          left  = m1;
+  }
+  return (left + right) / 2n;
+}
+
 export async function findOptimalLoanSize(
   fn:    (amount: bigint) => Promise<ProfitResult>,
   min  = CONFIG.MIN_LOAN_USDC,

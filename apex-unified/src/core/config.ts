@@ -30,9 +30,10 @@ export const CONFIG = {
   ALLOW_LIVE: process.env.ALLOW_LIVE === 'true',
 
   // Network
-  CHAIN_ID:          parseInt(optional('CHAIN_ID', '8453'), 10) as 8453,
-  ALCHEMY_WSS_URL:   required('ALCHEMY_WSS_URL'),
-  BASE_HTTPS_URL:    optional('BASE_HTTPS_URL', ''),    // Alchemy HTTPS — required for FastPathExecutor
+  CHAIN_ID:           parseInt(optional('CHAIN_ID', '8453'), 10) as 8453,
+  ALCHEMY_WSS_URL:    required('ALCHEMY_WSS_URL'),
+  BASE_HTTPS_URL:     optional('BASE_HTTPS_URL',  ''),   // single HTTPS endpoint
+  BASE_HTTPS_URLS:    optional('BASE_HTTPS_URLS', ''),   // comma-separated list (takes priority)
   BASE_SEQUENCER_URL: 'https://mainnet.base.org',
 
   // Strategy feature flags
@@ -87,8 +88,10 @@ export const CONFIG = {
   ],
 
   // Sizing
-  MIN_LOAN_USDC:     1_000n * 1_000_000n,
-  MAX_LOAN_USDC:    50_000n * 1_000_000n,
+  MIN_LOAN_USDC:      1_000n * 1_000_000n,
+  MAX_LOAN_USDC:     50_000n * 1_000_000n,
+  MIN_LOAN_WETH:    500_000_000_000_000_000n,     // 0.5 ETH in wei
+  MAX_LOAN_WETH: 30_000_000_000_000_000_000n,     // 30 ETH in wei
   MAX_TERNARY_ITERS: 8,
   MIN_PROFIT_BPS:    20,
   MAX_CONCURRENT_CYCLES: 5,
