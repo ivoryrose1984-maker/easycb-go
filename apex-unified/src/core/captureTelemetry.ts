@@ -215,10 +215,13 @@ export function readCaptureStats(dates: string[], sinceMs = 0): CaptureStats[] {
     const deltas   = b.resolved.map(e => e.expected_vs_actual_delta).filter((v): v is number => v !== null);
     const blkTimes = b.resolved.map(e => e.blocks_elapsed).filter((v): v is number => v !== null);
 
-    // P&L from pass events only (D2 single source of truth)
+    // P&L chain (D2): signal.netProfitUsd → scanner captureDetected(netUsd) →
+    // written as expected_net_usd → summed here from pass events only.
     const grossTotal = passEvents.reduce((s, e) => s + (e.expected_gross_usd ?? 0), 0);
     const netTotal   = passEvents.reduce((s, e) => s + (e.expected_net_usd   ?? 0), 0);
     const bpsArr     = passEvents.map(e => e.spread_bps as number).sort((a, c) => a - c);
+    // floor(n/2) gives the true median for odd n and the upper-middle element for
+    // even n — a 1-element difference for integer bps values, acceptable for reporting.
     const median     = bpsArr.length > 0 ? bpsArr[Math.floor(bpsArr.length / 2)] : 0;
 
     // skip breakdown excludes anomalies — anomaly events are unit errors, not intentional filters

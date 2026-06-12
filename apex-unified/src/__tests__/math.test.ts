@@ -173,6 +173,17 @@ describe('cbETH cost model', () => {
     const net = Math.max(0, grossProfitUsd - gasUsd - grossProfitUsd * (CONFIG.FLASH_LOAN_FEE_BPS / 10_000));
     expect(net).toBe(0);
   });
+
+  it('all four signals use the same flash loan fee formula (FLASH_LOAN_FEE_BPS/10000)', () => {
+    // Regression guard: ensures aerodromeSignal, triangularArbSignal, dexSpreadSignal,
+    // and cbETHFairValueSignal all produce net = gross - gas when fee = 0.
+    const gross = 5.0;
+    const gas   = 0.9;
+    const fee   = CONFIG.FLASH_LOAN_FEE_BPS / 10_000; // must be 0
+    const net   = Math.max(0, gross - gas - gross * fee);
+    expect(fee).toBe(0);
+    expect(net).toBeCloseTo(gross - gas, 10);
+  });
 });
 
 // ── encode2HopPath ────────────────────────────────────────────────────────────

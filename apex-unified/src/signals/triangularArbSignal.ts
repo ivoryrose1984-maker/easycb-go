@@ -153,7 +153,7 @@ export class TriangularArbSignal {
         spreadBps,
         grossProfitUsd:   usdcToUsd(grossProfit),
         netProfitUsd:     parseFloat(Math.max(0,
-          usdcToUsd(grossProfit) - (0.0003 * (Number(ethPriceUsd) / 1e6)) - usdcToUsd(grossProfit) * 0.0015
+          usdcToUsd(grossProfit) - (0.0003 * (Number(ethPriceUsd) / 1e6)) - usdcToUsd(grossProfit) * (CONFIG.FLASH_LOAN_FEE_BPS / 10_000)
         ).toFixed(4)),
         gasEstimate:      '0.0003',
         slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(amountIn) / 1e12) * 10)),

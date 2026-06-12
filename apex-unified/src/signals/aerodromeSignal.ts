@@ -141,7 +141,7 @@ export class AerodromeSignal {
         cexPrice:         null,
         spreadBps,
         grossProfitUsd:   grossUsd,
-        netProfitUsd:     parseFloat(Math.max(0, grossUsd - gasUsd - grossUsd * 0.001).toFixed(4)),
+        netProfitUsd:     parseFloat(Math.max(0, grossUsd - gasUsd - grossUsd * (CONFIG.FLASH_LOAN_FEE_BPS / 10_000)).toFixed(4)),
         gasEstimate:      '0.0003',
         slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(loanAmount) / 1e12) * 10)),
         flashLoanFeeEst:  0,

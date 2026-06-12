@@ -58,6 +58,9 @@ function buildStatsFromCapture(strategyId: StrategyId, captureArr: CaptureStats[
     avgGasCostEth:           0.0003,
     avgSlippageBps:          0,
     medianOpportunityBps:    c.medianSpreadBps,
+    // falsePositiveRate = intentional skips / total detected; anomalies (data quality
+    // issues) are excluded from the numerator but included in the denominator so the
+    // rate reflects signal quality, not pool/data failures.
     falsePositiveRate:       c.detected > 0 ? c.skipped / c.detected : 0,
     expectedValueUsd:        c.netEstimatedProfitUsd,
   };
