@@ -83,6 +83,54 @@ describe('liquidityImpactBps', () => {
   });
 });
 
+// ── Spread formula properties (BUG-01 / Phase 1) ─────────────────────────────
+
+function spreadBps(loanAmount: bigint, sellOut: bigint): number {
+  return loanAmount > 0n ? Number(((sellOut - loanAmount) * 10_000n) / loanAmount) : 0;
+}
+
+describe('spreadBps formula properties', () => {
+  it('same-pool round-trip at 500bps fee tier ≈ -10bps (2 × 0.05% fee)', () => {
+    // buy: 10000 USDC → 9995 USDC-eq (0.05% fee taken)
+    // sell: 9995 USDC-eq → 9990.0025 USDC (another 0.05% fee taken)
+    const loan    = 10_000_000_000n; // 10000 USDC (6-dec)
+    const buyOut  = loan * 9_995n / 10_000n;
+    const sellOut = buyOut * 9_995n / 10_000n;
+    const s = spreadBps(loan, sellOut);
+    expect(s).toBeGreaterThan(-20);
+    expect(s).toBeLessThan(0);
+  });
+
+  it('same-pool round-trip at 100bps fee tier ≈ -2bps', () => {
+    const loan    = 10_000_000_000n;
+    const buyOut  = loan * 9_999n / 10_000n;
+    const sellOut = buyOut * 9_999n / 10_000n;
+    const s = spreadBps(loan, sellOut);
+    expect(s).toBeGreaterThan(-10);
+    expect(s).toBeLessThan(0);
+  });
+
+  it('empty pool (sellOut=0) produces -10000bps', () => {
+    const s = spreadBps(1_000_000n, 0n);
+    expect(s).toBe(-10_000);
+  });
+
+  it('|spread| > 2000bps triggers anomaly gate', () => {
+    // dust output from an absent pool
+    const loan    = 5_000_000_000n;
+    const sellOut = 100_000n; // tiny fraction returned
+    const s = spreadBps(loan, sellOut);
+    expect(Math.abs(s)).toBeGreaterThan(2000);
+  });
+
+  it('fair cross-DEX arb at +30bps stays within ±200bps', () => {
+    const loan    = 5_000_000_000n;
+    const sellOut = loan * 10_030n / 10_000n; // +30bps profit
+    const s = spreadBps(loan, sellOut);
+    expect(Math.abs(s)).toBeLessThanOrEqual(200);
+  });
+});
+
 // ── encode2HopPath ────────────────────────────────────────────────────────────
 
 const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';

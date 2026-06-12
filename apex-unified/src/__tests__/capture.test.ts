@@ -242,3 +242,47 @@ describe('readCaptureStats — sinceMs filter', () => {
     expect(stats[0].detected).toBe(2);
   });
 });
+
+// ── anomaly filter_result (Phase 1 / BUG-01) ─────────────────────────────────
+
+describe('readCaptureStats — anomaly accounting', () => {
+  const TS = 1_000_000;
+
+  const line = (filterResult: 'pass' | 'skip' | 'anomaly') => JSON.stringify({
+    event: 'detected', opportunityId: `opp-${filterResult}`, strategyId: 'apex.dex_spread',
+    block: 1, ts_ms: TS, path: 'USDC/WETH', spread_bps: filterResult === 'anomaly' ? -9577 : 30,
+    expected_gross_usd: 10, expected_net_usd: 8, loan_size: '5000000000',
+    filter_result: filterResult, skip_reason: filterResult === 'skip' ? 'thin_pool' : null,
+  });
+
+  const CONTENT = [line('pass'), line('skip'), line('anomaly')].join('\n');
+
+  beforeEach(() => {
+    const fs = require('fs') as typeof import('fs');
+    jest.spyOn(fs, 'existsSync').mockReturnValue(true);
+    (jest.spyOn(fs, 'readFileSync') as jest.SpyInstance).mockReturnValue(CONTENT);
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('anomaly is counted separately from skip', () => {
+    const [s] = readCaptureStats(['2026-06-12']);
+    expect(s.detected).toBe(3);
+    expect(s.passed).toBe(1);
+    expect(s.skipped).toBe(1);
+    expect(s.anomalies).toBe(1);
+  });
+
+  it('anomaly is not in skipReasonBreakdown', () => {
+    const [s] = readCaptureStats(['2026-06-12']);
+    const keys = Object.keys(s.skipReasonBreakdown);
+    expect(keys).not.toContain('unit_anomaly');
+    expect(keys).toContain('thin_pool');
+  });
+
+  it('anomaly does not contribute to P&L figures', () => {
+    const [s] = readCaptureStats(['2026-06-12']);
+    // Only the 1 pass event contributes to gross/net
+    expect(s.grossEstimatedProfitUsd).toBeCloseTo(10);
+  });
+});

@@ -28,18 +28,17 @@ async function main(): Promise<void> {
 
   if (report.captureStats.length > 0) {
     console.log('  ── Capture Telemetry');
-    console.log(`  ${'Strategy'.padEnd(28)} ${'Det'.padStart(7)} ${'Pass'.padStart(6)} ${'Skip'.padStart(6)} ${'GrossUSD'.padStart(10)} ${'NetUSD'.padStart(9)} ${'MedBps'.padStart(7)} ${'ΔNet'.padStart(7)}`);
+    console.log(`  ${'Strategy'.padEnd(28)} ${'Det'.padStart(7)} ${'Pass'.padStart(6)} ${'Skip'.padStart(6)} ${'Anom'.padStart(5)} ${'GrossUSD'.padStart(10)} ${'NetUSD'.padStart(9)} ${'MedBps'.padStart(7)}`);
     for (const c of report.captureStats) {
-      const delta = c.avgProfitDelta !== null ? `$${c.avgProfitDelta.toFixed(2)}` : 'n/a';
       console.log(
         `  ${c.strategyId.padEnd(28)} ` +
         `${String(c.detected).padStart(7)} ` +
         `${String(c.passed).padStart(6)} ` +
         `${String(c.skipped).padStart(6)} ` +
+        `${String(c.anomalies).padStart(5)} ` +
         `${('$' + c.grossEstimatedProfitUsd.toFixed(2)).padStart(10)} ` +
         `${('$' + c.netEstimatedProfitUsd.toFixed(2)).padStart(9)} ` +
-        `${String(c.medianSpreadBps).padStart(7)} ` +
-        `${delta.padStart(7)}`
+        `${String(c.medianSpreadBps).padStart(7)}`
       );
     }
     if (report.captureStats.some(c => Object.keys(c.skipReasonBreakdown).length > 0)) {

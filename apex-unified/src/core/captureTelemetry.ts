@@ -10,7 +10,8 @@ import * as path from 'path';
 
 const LOG_DIR = path.resolve(process.cwd(), 'logs');
 
-export type FilterResult = 'pass' | 'skip';
+// 'anomaly' = |spread| > 2000bps (unit error or empty pool) — excluded from skip stats
+export type FilterResult = 'pass' | 'skip' | 'anomaly';
 export type Outcome = 'LANDED_PROFIT' | 'LANDED_LOSS' | 'REVERTED' | 'NOT_INCLUDED' | 'ERROR';
 
 // ── Event parameter shapes ────────────────────────────────────────────────────
@@ -50,9 +51,10 @@ export interface ResolveParams {
 
 export interface CaptureStats {
   strategyId:              string;
-  detected:                number;
+  detected:                number;  // pass + skip + anomaly
   passed:                  number;
-  skipped:                 number;
+  skipped:                 number;  // intentional filters (thin pool, below threshold, dedup)
+  anomalies:               number;  // |spread| > 2000bps — excluded from skip stats
   submitted:               number;
   resolved:                number;
   landedProfit:            number;
@@ -202,22 +204,24 @@ export function readCaptureStats(dates: string[], sinceMs = 0): CaptureStats[] {
 
   const stats: CaptureStats[] = [];
   for (const [sid, b] of byStrategy) {
-    const passEvents   = b.detected.filter(e => e.filter_result === 'pass');
-    const passed       = passEvents.length;
-    const skipped      = b.detected.length - passed;
-    const sub          = b.submitted.length;
-    const landed       = b.resolved.filter(e => e.outcome === 'LANDED_PROFIT' || e.outcome === 'LANDED_LOSS').length;
-    const landedProfit = b.resolved.filter(e => e.outcome === 'LANDED_PROFIT').length;
+    const passEvents     = b.detected.filter(e => e.filter_result === 'pass');
+    const passed         = passEvents.length;
+    const anomalies      = b.detected.filter(e => e.filter_result === 'anomaly').length;
+    const skipped        = b.detected.length - passed - anomalies;
+    const sub            = b.submitted.length;
+    const landed         = b.resolved.filter(e => e.outcome === 'LANDED_PROFIT' || e.outcome === 'LANDED_LOSS').length;
+    const landedProfit   = b.resolved.filter(e => e.outcome === 'LANDED_PROFIT').length;
 
     const deltas   = b.resolved.map(e => e.expected_vs_actual_delta).filter((v): v is number => v !== null);
     const blkTimes = b.resolved.map(e => e.blocks_elapsed).filter((v): v is number => v !== null);
 
-    // P&L from pass events (D2 single source of truth)
+    // P&L from pass events only (D2 single source of truth)
     const grossTotal = passEvents.reduce((s, e) => s + (e.expected_gross_usd ?? 0), 0);
     const netTotal   = passEvents.reduce((s, e) => s + (e.expected_net_usd   ?? 0), 0);
     const bpsArr     = passEvents.map(e => e.spread_bps as number).sort((a, c) => a - c);
     const median     = bpsArr.length > 0 ? bpsArr[Math.floor(bpsArr.length / 2)] : 0;
 
+    // skip breakdown excludes anomalies — anomaly events are unit errors, not intentional filters
     const skipBreakdown: Record<string, number> = {};
     for (const e of b.detected.filter(e => e.filter_result === 'skip')) {
       const key = e.skip_reason ?? 'unknown';
@@ -229,6 +233,7 @@ export function readCaptureStats(dates: string[], sinceMs = 0): CaptureStats[] {
       detected:                b.detected.length,
       passed,
       skipped,
+      anomalies,
       submitted:               sub,
       resolved:                b.resolved.length,
       landedProfit,

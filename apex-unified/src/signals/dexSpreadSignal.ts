@@ -157,6 +157,28 @@ export class DexSpreadSignal {
         ? Number(((bestSell.out - loanAmount) * 10_000n) / loanAmount)
         : 0;
 
+      // BUG-01: anomaly gate — |spread| > 2000bps indicates empty/thin pool or decimal
+      // mismatch, not a real market opportunity. Tag as "anomaly" (not "skip") so skip
+      // stats remain clean. Skip expensive liquidity check and size search.
+      if (Math.abs(spreadBpsProbe) > 2000) {
+        logger.warn('DEX', `${pair.name} unit anomaly: spread=${spreadBpsProbe}bps — thin pool or no liquidity`);
+        logRejection({ strategyId: 'apex.dex_spread', blockNumber, pair: pair.name, spreadBps: spreadBpsProbe, reason: 'unit_anomaly' });
+        return {
+          pair:            pair.name,
+          tokenIn:         pair.tokenIn,
+          tokenOut:        pair.tokenOut,
+          buyDex:          bestBuy.dex,
+          buyFee:          bestBuy.fee,
+          sellDex:         bestSell.dex,
+          sellFee:         bestSell.fee,
+          spreadBps:       spreadBpsProbe,
+          loanAmount,
+          grossProfit:     0n,
+          rejectionReason: `unit_anomaly: spread=${spreadBpsProbe}bps`,
+          opportunity:     null,
+        };
+      }
+
       const dexLabel = isCrossDex
         ? `${bestBuy.dex}→${bestSell.dex}`
         : bestBuy.dex;
@@ -294,7 +316,7 @@ export class DexSpreadSignal {
         cexPrice:         null,
         spreadBps,
         grossProfitUsd:   grossUsd,
-        netProfitUsd:     parseFloat(Math.max(0, grossUsd - gasUsd - grossUsd * 0.001).toFixed(4)),
+        netProfitUsd:     parseFloat(Math.max(0, grossUsd - gasUsd - grossUsd * (CONFIG.FLASH_LOAN_FEE_BPS / 10_000)).toFixed(4)),
         gasEstimate:      '0.0003',
         slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(finalLoan) / 1e12) * 10)),
         flashLoanFeeEst:  0,

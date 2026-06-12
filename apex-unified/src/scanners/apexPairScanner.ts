@@ -75,6 +75,7 @@ export class ApexPairScanner {
       });
 
       if (!res.opportunity) {
+        const isAnomaly = res.rejectionReason?.startsWith('unit_anomaly') ?? false;
         captureDetected({
           opportunityId: `dex-${res.pair}-${blockNumber}-${res.spreadBps}`,
           strategyId:    strategyId,
@@ -84,8 +85,8 @@ export class ApexPairScanner {
           grossUsd:      0,
           netUsd:        0,
           loanSize:      res.loanAmount.toString(),
-          filterResult:  'skip',
-          skipReason:    res.rejectionReason ?? 'below_threshold',
+          filterResult:  isAnomaly ? 'anomaly' : 'skip',
+          skipReason:    isAnomaly ? null : (res.rejectionReason ?? 'below_threshold'),
         });
         continue;
       }
