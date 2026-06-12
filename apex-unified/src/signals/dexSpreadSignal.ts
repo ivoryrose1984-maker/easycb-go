@@ -55,9 +55,14 @@ export class DexSpreadSignal {
     bestBuy:  QuoteCandidate,
     bestSell: QuoteCandidate,
     isWethIn: boolean,
+    isDaiIn:  boolean,
   ): Promise<{ optimalAmount: bigint; lo: bigint; hi: bigint }> {
-    const lo = isWethIn ? CONFIG.MIN_LOAN_WETH  : CONFIG.MIN_LOAN_USDC;
-    const hi = isWethIn ? CONFIG.MAX_LOAN_WETH  : CONFIG.MAX_LOAN_USDC;
+    const lo = isWethIn ? CONFIG.MIN_LOAN_WETH
+             : isDaiIn  ? CONFIG.MIN_LOAN_DAI
+             : CONFIG.MIN_LOAN_USDC;
+    const hi = isWethIn ? CONFIG.MAX_LOAN_WETH
+             : isDaiIn  ? CONFIG.MAX_LOAN_DAI
+             : CONFIG.MAX_LOAN_USDC;
 
     const buyQ  = bestBuy.dex  === 'uni-v3' ? this.uniQuoter  : this.cakeQuoter;
     const sellQ = bestSell.dex === 'uni-v3' ? this.uniQuoter  : this.cakeQuoter;
@@ -209,7 +214,8 @@ export class DexSpreadSignal {
 
       if (isOpportunity && !thinPool) {
         const isWethIn = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.WETH.toLowerCase();
-        const { optimalAmount, lo, hi } = await this.sizeSearch(pair, bestBuy, bestSell, isWethIn);
+        const isDaiIn  = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.DAI.toLowerCase();
+        const { optimalAmount, lo, hi } = await this.sizeSearch(pair, bestBuy, bestSell, isWethIn, isDaiIn);
 
         // Re-quote at optimal size to get accurate final output
         const buyQ  = bestBuy.dex  === 'uni-v3' ? this.uniQuoter  : this.cakeQuoter;
@@ -246,10 +252,14 @@ export class DexSpreadSignal {
       );
 
       const isWethIn       = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.WETH.toLowerCase();
+      const isDaiIn        = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.DAI.toLowerCase();
       const grossProfitRaw = finalSellOut > finalLoan ? finalSellOut - finalLoan : 0n;
+      // DAI is 18-dec ~$1; divide by 1e18. WETH is 18-dec; use eth price. Others are 6-dec USDC.
       const grossUsd       = isWethIn
         ? Math.max(0, usdcToUsd(grossProfitRaw * ethPriceUsd / 10n ** 18n))
-        : Math.max(0, usdcToUsd(grossProfitRaw));
+        : isDaiIn
+          ? Math.max(0, Number(grossProfitRaw) / 1e18)
+          : Math.max(0, usdcToUsd(grossProfitRaw));
       const gasUsd         = 0.0003 * (Number(ethPriceUsd) / 1e6);
 
       const hash = opportunityHash({

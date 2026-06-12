@@ -40,13 +40,17 @@ export class ApexPairScanner {
       return { strategyId, scanned: 0, opportunities: [], errors: 0, durationMs: 0 };
     }
 
-    // USDC/USDT/DAI/USDbC pairs: 5000 USDC probe for realistic signal resolution
-    // WETH tokenIn pairs: 3 ETH probe (~same order of magnitude)
-    const WETH_18_PROBE  = ethers.parseEther('3');
-    const USDC_PROBE     = 5_000n * 1_000_000n;
+    // Probe amounts are denomination-correct for each tokenIn.
+    // DAI uses 18 decimals (not 6 like USDC) — wrong probe caused phantom spread.
+    const WETH_PROBE = ethers.parseEther('3');        // 3 ETH (18 dec)
+    const DAI_PROBE  = ethers.parseUnits('5000', 18); // 5000 DAI (18 dec)
+    const USDC_PROBE = 5_000n * 1_000_000n;           // 5000 USDC/USDT/USDbC (6 dec)
+
     const results = await Promise.allSettled(
       PAIRS.map(pair => {
-        const probe = pair.tokenIn === CONFIG.TOKENS.WETH ? WETH_18_PROBE : USDC_PROBE;
+        const probe = pair.tokenIn === CONFIG.TOKENS.WETH ? WETH_PROBE
+                    : pair.tokenIn === CONFIG.TOKENS.DAI  ? DAI_PROBE
+                    : USDC_PROBE;
         return this.signal.scan(pair, probe, blockNumber, ethPriceUsd);
       })
     );
