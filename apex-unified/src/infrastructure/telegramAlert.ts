@@ -23,12 +23,17 @@ export async function initTelegram(): Promise<void> {
   }
   try {
     const candidate = new TelegramBot(CONFIG.TELEGRAM_BOT_TOKEN, { polling: false });
-    await candidate.getMe();
-    bot    = candidate;
-    chatId = CONFIG.TELEGRAM_CHAT_ID;
-    logger.info('TG', 'Alerts enabled');
+    await candidate.getMe(); // validates token
+    // Probe chat_id with a real send — getMe() only validates the token, not the chat
+    await candidate.sendMessage(CONFIG.TELEGRAM_CHAT_ID,
+      `🤖 <b>ApexUnified</b>\n\nBot started — alerts active`, { parse_mode: 'HTML' });
+    bot       = candidate;
+    chatId    = CONFIG.TELEGRAM_CHAT_ID;
+    lastSentMs = Date.now();
+    logger.info('TG', 'Alerts enabled and chat_id verified');
   } catch (err: any) {
-    logger.error('TG', `Init failed: ${err.message}`);
+    logger.warn('TG', `Init failed (alerts disabled): ${err.message}`);
+    // bot/chatId remain null — all send functions become no-ops
   }
 }
 

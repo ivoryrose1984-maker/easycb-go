@@ -131,8 +131,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  await initTelegram();
-  sendAlert(`ApexUnified started\nRun ID: ${runCtx.runId}\nMode: DRY RUN\nChain: Base`);
+  await initTelegram(); // sends probe message on success; disables silently on failure
 
   // FastPathExecutor for fee-cache warming (no wallet in dry run — execute() is a no-op)
   if (CONFIG.BASE_HTTPS_URL) {
@@ -149,10 +148,12 @@ async function main(): Promise<void> {
     logger.warn('MAIN', 'BASE_HTTPS_URL not set — FastPathExecutor disabled (add to .env)');
   }
 
-  if (CONFIG.ENABLE_CEX_CONTEXT) {
+  if (CONFIG.ENABLE_CEX_CONTEXT && CONFIG.ENABLE_BINANCE) {
     logger.info('MAIN', 'Starting Binance CEX feed...');
     getCexFeed();
     await new Promise(r => setTimeout(r, 2_000));
+  } else if (CONFIG.ENABLE_CEX_CONTEXT && !CONFIG.ENABLE_BINANCE) {
+    logger.warn('MAIN', 'ENABLE_BINANCE=false — CEX feed disabled (Hetzner geo-blocked; set true if your IP allows Binance)');
   }
 
   const monitorAddress  = process.env.WALLET_ADDRESS ?? process.env.MONITOR_ADDRESS ?? '';

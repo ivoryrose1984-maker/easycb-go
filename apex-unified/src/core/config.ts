@@ -42,6 +42,9 @@ export const CONFIG = {
   ENABLE_CBETH_SIGNAL:         flag('ENABLE_CBETH_SIGNAL',         true),
   ENABLE_AERODROME_SIGNAL:     flag('ENABLE_AERODROME_SIGNAL',     true),
   ENABLE_CEX_CONTEXT:          flag('ENABLE_CEX_CONTEXT',          true),
+  // Binance feed — default false: Hetzner/VPS IPs are geo-blocked (HTTP 451).
+  // Set true only when running from a region with Binance access.
+  ENABLE_BINANCE:              flag('ENABLE_BINANCE',               false),
   ENABLE_FLASH_LOAN_PLANNER:   flag('ENABLE_FLASH_LOAN_PLANNER',   true),
   ENABLE_BUILDER_SUBMISSION:   flag('ENABLE_BUILDER_SUBMISSION',   false),
 
