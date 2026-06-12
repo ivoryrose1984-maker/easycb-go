@@ -27,8 +27,20 @@ if (parseInt(process.env.CHAIN_ID ?? '8453', 10) !== 8453) {
   throw new Error(`CHAIN_ID must be 8453 (Base), got ${process.env.CHAIN_ID}`);
 }
 
+// Provider errors, CEX feed reconnects, and gas forecaster failures surface here.
+// Log and continue — only exit for truly unknown exceptions that could leave the
+// bot in a corrupt state. ResilientWsProvider handles provider-level failures.
 process.on('unhandledRejection', (reason) => {
-  console.error('[FATAL] unhandledRejection:', reason);
+  const msg = reason instanceof Error ? reason.stack ?? reason.message : String(reason);
+  logger.error('FATAL', `unhandledRejection: ${msg}`);
+  logError({ timestamp: new Date().toISOString(), block: 0, error: `unhandledRejection: ${msg}` });
+  // Do NOT exit — let the ResilientWsProvider's reconnect loop handle provider failures.
+});
+
+process.on('uncaughtException', (err) => {
+  logger.error('FATAL', `uncaughtException: ${err.stack ?? err.message}`);
+  logError({ timestamp: new Date().toISOString(), block: 0, error: `uncaughtException: ${err.message}` });
+  // Exit on uncaught synchronous exceptions — these indicate a coding bug, not a transient failure.
   process.exit(1);
 });
 
