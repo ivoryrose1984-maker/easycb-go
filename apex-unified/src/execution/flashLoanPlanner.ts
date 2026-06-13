@@ -5,6 +5,104 @@ import { Opportunity } from '../types/Opportunity';
 import { ExecutionPlan } from '../types/ExecutionPlan';
 import { encode2HopPath } from './routePlanner';
 
+// ── Babylonian integer square root ────────────────────────────────────────────
+// Returns floor(√n). No heap allocation — operates entirely on BigInt value
+// types. Converges in O(log log n) iterations from a bit-length initial guess.
+export function bigintSqrt(n: bigint): bigint {
+  if (n <= 0n) return 0n;
+  // 2^ceil(bits/2) ≥ √n always — at most 2 extra Babylonian iters needed.
+  let x = 1n << BigInt((n.toString(2).length + 1) >> 1);
+  while (true) {
+    const y = (x + n / x) >> 1n;
+    if (y >= x) return x;   // x = floor(√n) — converged
+    x = y;
+  }
+}
+
+// ── Closed-form optimal flash loan input for 2-pool CFMM ──────────────────────
+// Solves dP/dΔx = 0 for a constant-product (x·y = k) 2-pool arbitrage path.
+//
+// Derivation: profit P(u) = K·u / (A + B·u) − u where
+//   K = g_a·g_b·xB·yA,  A = xA·yB,  B = g_a·(yB + g_b·yA)
+//   g = (10000 − feeBps) / 10000  (effective fee multiplier in bps units)
+//
+// Setting dP/du = 0: (A + B·u)² = K·A
+//   → u* = 10000·(√(γ_a·γ_b·xA·yA·xB·yB) − xA·yB·10000)
+//           / (γ_a·(10000·yB + γ_b·yA))
+//
+// Pool orientation:
+//   rA.x = tokenIn  reserves in pool A (buy leg)   rA.y = tokenOut
+//   rB.x = tokenOut reserves in pool B (sell leg)  rB.y = tokenIn
+//   i.e. rB is the mirror: what A gave us goes in, what we started with comes out.
+//
+// Returns null when: pools at equilibrium (no arb), negative numerator, or
+// degenerate reserves (zero).
+export interface PoolReserves { x: bigint; y: bigint }
+
+export function optimalInputCFMM(
+  rA: PoolReserves,
+  rB: PoolReserves,
+  feeBpsA: bigint,
+  feeBpsB: bigint,
+): bigint | null {
+  if (rA.x === 0n || rA.y === 0n || rB.x === 0n || rB.y === 0n) return null;
+  if (feeBpsA >= 10_000n || feeBpsB >= 10_000n) return null;
+
+  const gammaA = 10_000n - feeBpsA;
+  const gammaB = 10_000n - feeBpsB;
+
+  // √(γ_a·γ_b·xA·yA·xB·yB) — product can reach ~10^104 for 30-ETH positions
+  const sqrtProd = bigintSqrt(gammaA * gammaB * rA.x * rA.y * rB.x * rB.y);
+
+  // num = √(...) − xA·yB·10000
+  const num = sqrtProd - rA.x * rB.y * 10_000n;
+  if (num <= 0n) return null;
+
+  const denom = gammaA * (10_000n * rB.y + gammaB * rA.y);
+  if (denom === 0n) return null;
+
+  const optimal = num * 10_000n / denom;
+  return optimal > 0n ? optimal : null;
+}
+
+// ── Analytical max gross edge at u* (no RPC) ─────────────────────────────────
+// Pre-screens a pair before any RPC call: if this returns < MIN_NET_EDGE_BPS +
+// cost_bps, skip. Returns null when no profitable arb exists at these reserves.
+export function maxGrossEdgeBps(
+  rA: PoolReserves,
+  rB: PoolReserves,
+  feeBpsA: bigint,
+  feeBpsB: bigint,
+): number | null {
+  const u = optimalInputCFMM(rA, rB, feeBpsA, feeBpsB);
+  if (!u || u <= 0n) return null;
+
+  const gammaA = 10_000n - feeBpsA;
+  const gammaB = 10_000n - feeBpsB;
+
+  const dy    = gammaA * rA.y * u / (rA.x * 10_000n + gammaA * u);
+  const dxOut = gammaB * rB.x * dy / (rB.y * 10_000n + gammaB * dy);
+
+  if (dxOut <= u) return null;
+  return Number((dxOut - u) * 10_000n / u);
+}
+
+// ── Dynamic break-even edge threshold ────────────────────────────────────────
+// Returns the minimum gross spread (bps) needed to net > 0 after gas + buffers.
+// Replaces the static MIN_NET_EDGE_BPS when you have real-time gas + loan size.
+// loanAmountInUsd6: loan size in 6-dec USD units (same as USDC base units).
+export function breakEvenEdgeBps(
+  gasForecast: GasForecast,
+  ethPriceUsd6: bigint,   // ETH price in 6-dec USDC
+  loanAmountUsd6: bigint, // loan in 6-dec USDC
+): number {
+  if (loanAmountUsd6 === 0n) return 9_999;
+  const gasCostWei      = CONFIG.GAS_ESTIMATE * gasForecast.predictedBaseFee;
+  const gasCostUsd6     = (gasCostWei * ethPriceUsd6) / 10n ** 18n;
+  const gasBps          = Number(gasCostUsd6 * 10_000n / loanAmountUsd6);
+  return gasBps + CONFIG.LATENCY_BUFFER_BPS + CONFIG.FAILURE_BUFFER_BPS;
+}
+
 export interface ProfitResult {
   netProfit:           bigint;
   score:               number;

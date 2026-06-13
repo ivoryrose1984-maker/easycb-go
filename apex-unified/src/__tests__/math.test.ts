@@ -1,5 +1,7 @@
 import { usdcToUsd, weiToEth } from '../core/config';
 import CONFIG from '../core/config';
+import { bigintSqrt, optimalInputCFMM, maxGrossEdgeBps } from '../execution/flashLoanPlanner';
+import { packMinAmountOut } from '../execution/FastPathExecutor';
 import { encode2HopPath, encode3HopPath } from '../execution/routePlanner';
 import { ethers }                          from 'ethers';
 
@@ -183,6 +185,115 @@ describe('cbETH cost model', () => {
     const net   = Math.max(0, gross - gas - gross * fee);
     expect(fee).toBe(0);
     expect(net).toBeCloseTo(gross - gas, 10);
+  });
+});
+
+// ── bigintSqrt ────────────────────────────────────────────────────────────────
+
+describe('bigintSqrt', () => {
+  it('returns 0 for 0', () => expect(bigintSqrt(0n)).toBe(0n));
+  it('returns 1 for 1', () => expect(bigintSqrt(1n)).toBe(1n));
+  it('returns 2 for 4', () => expect(bigintSqrt(4n)).toBe(2n));
+  it('returns 3 for 9', () => expect(bigintSqrt(9n)).toBe(3n));
+  it('returns floor for non-perfect square (√2 = 1)', () => expect(bigintSqrt(2n)).toBe(1n));
+  it('returns floor for non-perfect square (√8 = 2)', () => expect(bigintSqrt(8n)).toBe(2n));
+  it('handles large values: √(10^40) = 10^20', () => {
+    expect(bigintSqrt(10n ** 40n)).toBe(10n ** 20n);
+  });
+  it('handles very large values (6-reserve product ~10^104)', () => {
+    // γ_a * γ_b * rAx * rAy * rBx * rBy where reserves are 30 ETH each
+    const r = 30n * 10n ** 18n;
+    const product = 9_950n * 9_950n * r * r * r * r; // ~10^103
+    const s = bigintSqrt(product);
+    expect(s * s).toBeLessThanOrEqual(product);
+    expect((s + 1n) * (s + 1n)).toBeGreaterThan(product);
+  });
+});
+
+// ── optimalInputCFMM ──────────────────────────────────────────────────────────
+
+describe('optimalInputCFMM', () => {
+  // Pool A: 1000 USDC / 1 ETH (price 1000 USDC/ETH)
+  // Pool B varies by test
+  const rA = { x: 1_000_000_000n, y: 1_000_000_000_000_000_000n }; // 1000 USDC (6-dec), 1 ETH (18-dec)
+
+  it('returns null when both pools are at equal price (no arb)', () => {
+    // Pool B at same 1000 USDC/ETH: rB.x=USDC, rB.y=ETH input
+    const rB = { x: 2_000_000_000n, y: 2_000_000_000_000_000_000n };
+    expect(optimalInputCFMM(rA, rB, 30n, 30n)).toBeNull();
+  });
+
+  it('returns positive optimal input when pool B has higher ETH price', () => {
+    // Pool B at 1100 USDC/ETH → arb opportunity
+    const rB = { x: 2_200_000_000n, y: 2_000_000_000_000_000_000n };
+    const u = optimalInputCFMM(rA, rB, 30n, 30n);
+    expect(u).not.toBeNull();
+    expect(u!).toBeGreaterThan(0n);
+  });
+
+  it('optimal input is within sensible range (not larger than pool A reserves)', () => {
+    const rB = { x: 2_200_000_000n, y: 2_000_000_000_000_000_000n };
+    const u = optimalInputCFMM(rA, rB, 30n, 30n);
+    expect(u!).toBeLessThan(rA.x);
+  });
+
+  it('higher fee erodes max gross edge (0.3% fee earns more than 3% fee at same spread)', () => {
+    const rB = { x: 2_200_000_000n, y: 2_000_000_000_000_000_000n };
+    const bpsLow  = maxGrossEdgeBps(rA, rB, 30n, 30n) ?? 0;    // 0.3% fee — solution exists
+    const bpsHigh = maxGrossEdgeBps(rA, rB, 300n, 300n) ?? 0;  // 3%   fee — reduced edge
+    expect(bpsLow).toBeGreaterThan(bpsHigh);
+    // 30% fee (3000bps) exceeds the spread entirely — no arb exists
+    expect(optimalInputCFMM(rA, rB, 3_000n, 3_000n)).toBeNull();
+  });
+
+  it('returns null for zero reserves', () => {
+    expect(optimalInputCFMM({ x: 0n, y: 1n }, { x: 1n, y: 1n }, 30n, 30n)).toBeNull();
+  });
+
+  it('profit at u* is non-negative', () => {
+    const rB = { x: 2_200_000_000n, y: 2_000_000_000_000_000_000n };
+    const u = optimalInputCFMM(rA, rB, 30n, 30n)!;
+    const gammaA = 9_970n, gammaB = 9_970n;
+    const dy    = gammaA * rA.y * u / (rA.x * 10_000n + gammaA * u);
+    const dxOut = gammaB * rB.x * dy / (rB.y * 10_000n + gammaB * dy);
+    expect(dxOut).toBeGreaterThan(u); // gross profit > 0
+  });
+});
+
+// ── maxGrossEdgeBps ───────────────────────────────────────────────────────────
+
+describe('maxGrossEdgeBps', () => {
+  it('returns null when no arb exists', () => {
+    const rA = { x: 1_000n, y: 1_000n };
+    const rB = { x: 1_000n, y: 1_000n };
+    expect(maxGrossEdgeBps(rA, rB, 30n, 30n)).toBeNull();
+  });
+
+  it('returns positive bps when spread exists', () => {
+    const rA = { x: 1_000_000_000n, y: 1_000_000_000_000_000_000n };
+    const rB = { x: 2_200_000_000n, y: 2_000_000_000_000_000_000n };
+    const bps = maxGrossEdgeBps(rA, rB, 30n, 30n);
+    expect(bps).not.toBeNull();
+    expect(bps!).toBeGreaterThan(0);
+  });
+});
+
+// ── packMinAmountOut ──────────────────────────────────────────────────────────
+
+describe('packMinAmountOut', () => {
+  it('default 5bps: 10000 → 9995', () => {
+    expect(packMinAmountOut(10_000n)).toBe(9_995n);
+  });
+  it('zero quote → zero', () => expect(packMinAmountOut(0n)).toBe(0n));
+  it('100% slippage (10000bps) → 0 (accept anything)', () => {
+    expect(packMinAmountOut(10_000n, 10_000n)).toBe(0n);
+  });
+  it('50bps: 10000 → 9950', () => {
+    expect(packMinAmountOut(10_000n, 50n)).toBe(9_950n);
+  });
+  it('result always ≤ quote', () => {
+    const q = 7_654_321_000_000n;
+    expect(packMinAmountOut(q)).toBeLessThanOrEqual(q);
   });
 });
 

@@ -199,3 +199,30 @@ export class FastPathExecutor {
     this.nonce = await this.primary.getTransactionCount(this.wallet.address, 'pending');
   }
 }
+
+// ── Slippage floor packing ────────────────────────────────────────────────────
+// Returns minAmountOut = quote × (1 − slippageBps/10000), enforced on-chain.
+// Uses integer multiply + divide — no floating-point, no heap allocation.
+//
+// Default: 5 bps (0.05%) slippage tolerance.
+// Why 5 bps: 2-hop path through concentrated liquidity; typical L2 block latency
+// is 2s; 5bps absorbs price drift without over-rejecting profitable bundles.
+//
+// On-chain revert cost if slippage exceeded: ~3 000 gas (Balancer callback
+// fails after exactInput reverts; caught before profit check).
+export function packMinAmountOut(quote: bigint, slippageBps = 5n): bigint {
+  if (quote === 0n) return 0n;
+  if (slippageBps >= 10_000n) return 0n;  // 100% slippage = accept any output
+  return quote * (10_000n - slippageBps) / 10_000n;
+}
+
+// ── Pre-flight calldata size helper ──────────────────────────────────────────
+// Returns the exact byte length of the ABI-encoded executeArbitrageWithPreflight
+// calldata given the hop-count of the path (used for gas estimation pre-broadcast).
+// path bytes = 20 + (20+3) × hops where single hop = 20+3+20 = 43.
+export function preflightCalldataSize(hopCount: number): number {
+  const pathBytes = 20 + 23 * hopCount;  // addr + (fee+addr) × hops
+  // selector(4) + 8 fixed params × 32 + path offset(32) + path len(32) + path data(padded)
+  const pathWords = Math.ceil(pathBytes / 32);
+  return 4 + 8 * 32 + 32 + 32 + pathWords * 32;
+}
