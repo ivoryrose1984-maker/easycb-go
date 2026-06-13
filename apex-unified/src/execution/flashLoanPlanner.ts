@@ -20,6 +20,9 @@ export function bigintSqrt(n: bigint): bigint {
 }
 
 // ── Closed-form optimal flash loan input for 2-pool CFMM ──────────────────────
+// VOLATILE (x·y=k) POOLS ONLY — NOT Aerodrome stable pools (x³y+xy³=k) or any
+// concentrated-liquidity pool. For stable Aerodrome pairs use getAmountOutStable.
+//
 // Solves dP/dΔx = 0 for a constant-product (x·y = k) 2-pool arbitrage path.
 //
 // Derivation: profit P(u) = K·u / (A + B·u) − u where

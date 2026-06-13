@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.20;
+pragma solidity 0.8.19;
 
 // Deploy to Base. Uses Balancer V2 flash loans (0% fee).
 // Executes an arbitrary Uniswap V3 exactInput multi-hop path with borrowed funds.
@@ -34,21 +34,6 @@ interface IUniswapV3Router {
         uint256 amountOutMinimum;
     }
     function exactInput(ExactInputParams calldata params) external returns (uint256 amountOut);
-}
-
-// Minimal IUniswapV3Pool surface needed for pre-flight price check.
-// slot0() is the first storage slot in every Uni V3 / Aerodrome CL pool.
-interface IUniV3Pool {
-    /// @return sqrtPriceX96 Current sqrt price as Q64.96 fixed-point.
-    function slot0() external view returns (
-        uint160 sqrtPriceX96,
-        int24   tick,
-        uint16  observationIndex,
-        uint16  observationCardinality,
-        uint16  observationCardinalityNext,
-        uint8   feeProtocol,
-        bool    unlocked
-    );
 }
 
 // ─── Contract ────────────────────────────────────────────────────────────────
@@ -98,8 +83,6 @@ contract ApexFlashLoan {
     mapping(address => bool) public approvedRouters;
 
     // ── Events ────────────────────────────────────────────────────────────────
-
-    event PreflightRejected(address indexed pool, uint160 actual, uint160 expected, uint24 toleranceBps);
 
     event ArbitrageExecuted(
         address indexed token,
@@ -184,60 +167,6 @@ contract ApexFlashLoan {
         emit RouterUpdated(router, approved);
     }
 
-    // ─── Pre-flight price guard ───────────────────────────────────────────────
-
-    /// @dev Yul staticcall to pool.slot0(); reverts before Balancer is called so
-    ///      a stale bundle costs ~3 000 gas instead of ~200 000.
-    ///      Called ONLY from executeArbitrageWithPreflight — never from the callback.
-    ///
-    /// @param pool              Uniswap V3 (or compatible) pool address.
-    /// @param expectedSqrtPrice Off-chain snapshot of pool.slot0().sqrtPriceX96.
-    /// @param toleranceBps      Max acceptable deviation in basis points (e.g. 50).
-    function _assertPriceInBounds(
-        address pool,
-        uint160 expectedSqrtPrice,
-        uint24  toleranceBps
-    ) internal {
-        require(pool != address(0),      "Preflight: zero pool");
-        require(expectedSqrtPrice > 0,   "Preflight: zero expected price");
-        require(toleranceBps <= 500,     "Preflight: tolerance >5%");
-
-        // ── Yul: staticcall pool.slot0() selector = 0x3850c7bd ───────────────
-        // Uses inline assembly to avoid Solidity's ABI decoder overhead and to
-        // stay on the cold-call gas path (no memory expansion beyond scratchpad).
-        uint160 actualSqrtPrice;
-        assembly ("memory-safe") {
-            // Scratch space: write the 4-byte selector at offset 0x00
-            mstore(0x00, 0x3850c7bd00000000000000000000000000000000000000000000000000000000)
-
-            // staticcall(gas, addr, argsOffset, argsLen, retOffset, retLen)
-            // slot0 returns 7 values; we only need the first (sqrtPriceX96 = uint160).
-            // Allocate 0xe0 (224 bytes) return space starting at 0x20.
-            let ok := staticcall(gas(), pool, 0x00, 0x04, 0x20, 0xe0)
-            if iszero(ok) {
-                // Pool call failed — revert cheaply; the bundle is already bad.
-                mstore(0x00, 0x08c379a000000000000000000000000000000000000000000000000000000000) // Error(string)
-                mstore(0x04, 0x20)
-                mstore(0x24, 0x11)  // length = 17
-                mstore(0x44, 0x507265666c696768743a20736c6f7430206661696c65640000000000000000000) // "Preflight: slot0 failed"
-                revert(0x00, 0x64)
-            }
-            // First 32-byte word at 0x20 contains sqrtPriceX96 (right-padded uint160)
-            actualSqrtPrice := mload(0x20)
-        }
-
-        // ── Tolerance check in Solidity (cheaper than Yul here: no overflow risk) ──
-        uint256 diff   = actualSqrtPrice > expectedSqrtPrice
-            ? actualSqrtPrice - expectedSqrtPrice
-            : expectedSqrtPrice - actualSqrtPrice;
-        uint256 maxDev = (uint256(expectedSqrtPrice) * toleranceBps) / 10_000;
-
-        if (diff > maxDev) {
-            emit PreflightRejected(pool, actualSqrtPrice, expectedSqrtPrice, toleranceBps);
-            revert("Preflight: price stale");
-        }
-    }
-
     // ─── External entry point ─────────────────────────────────────────────────
 
     /// @notice Initiate a Balancer V2 flash loan and execute a UniV3 multi-hop arb.
@@ -267,56 +196,6 @@ contract ApexFlashLoan {
         // be repaid. Minimum single-hop path is addr(20) + fee(3) + addr(20).
         require(path.length >= 43, "Path too short");
         require(address(bytes20(path[:20])) == flashToken, "Path must start with flashToken");
-        require(address(bytes20(path[path.length - 20:])) == flashToken, "Path must end with flashToken");
-
-        address[] memory tokens  = new address[](1);
-        uint256[] memory amounts = new uint256[](1);
-        tokens[0]  = flashToken;
-        amounts[0] = flashAmount;
-
-        bytes memory userData = abi.encode(
-            uniV3Router, path, flashAmount, flashToken, minAmountOut
-        );
-        IBalancerVault(VAULT).flashLoan(address(this), tokens, amounts, userData);
-    }
-
-    // ─── Guarded entry point (pre-flight price check) ────────────────────────
-
-    /// @notice Like executeArbitrage but verifies pool price has not moved beyond
-    ///         toleranceBps before initiating the flash loan.
-    ///
-    ///         Pre-flight reverts at ~3 000 gas (staticcall + compare + revert)
-    ///         instead of ~200 000 gas if the swap itself reverts on stale quotes.
-    ///
-    ///         On Base, where txs are ordered by priority fee + arrival time rather
-    ///         than a competitive builder auction, this guard prevents wasted gas on
-    ///         bundles built from quotes that aged out during the 2-second block window.
-    ///
-    /// @param priceCheckPool    Pool whose slot0() sqrtPriceX96 is verified.
-    ///                          Pass address(0) to disable the check (identical to
-    ///                          calling executeArbitrage directly).
-    /// @param expectedSqrtPrice Off-chain snapshot of slot0().sqrtPriceX96.
-    /// @param toleranceBps      Acceptable drift, e.g. 50 = 0.5%.  Max 500.
-    function executeArbitrageWithPreflight(
-        address  flashToken,
-        uint256  flashAmount,
-        address  uniV3Router,
-        bytes calldata path,
-        uint256  minAmountOut,
-        address  priceCheckPool,
-        uint160  expectedSqrtPrice,
-        uint24   toleranceBps
-    ) external onlyOwner whenNotPaused {
-        // Pre-flight: revert here (< 3 000 gas) rather than deep inside Balancer
-        if (priceCheckPool != address(0)) {
-            _assertPriceInBounds(priceCheckPool, expectedSqrtPrice, toleranceBps);
-        }
-
-        require(approvedRouters[uniV3Router], "Router not approved");
-        require(flashToken  != address(0),    "Zero token");
-        require(flashAmount  > 0,             "Zero amount");
-        require(path.length >= 43,            "Path too short");
-        require(address(bytes20(path[:20]))              == flashToken, "Path must start with flashToken");
         require(address(bytes20(path[path.length - 20:])) == flashToken, "Path must end with flashToken");
 
         address[] memory tokens  = new address[](1);
