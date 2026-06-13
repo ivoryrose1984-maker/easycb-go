@@ -14,6 +14,7 @@ const PAIRS = [
   { tokenIn: CONFIG.TOKENS.WETH,  tokenOut: CONFIG.TOKENS.cbETH, name: 'WETH/cbETH', stable: false },
   { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.AERO,  name: 'USDC/AERO',  stable: false },
   { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.USDbC, name: 'USDC/USDbC', stable: true  },
+  { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.DAI,   name: 'USDC/DAI',   stable: true  },
 ];
 
 export class AerodromeScanner {
@@ -50,16 +51,35 @@ export class AerodromeScanner {
     for (const r of results) {
       if (r.status === 'rejected') { errors++; continue; }
       const res = r.value;
-      if (!res) continue;  // null = no pools exist for pair, not an error
+      if (!res) continue;
 
       logSignal(strategyId, {
         blockNumber,
-        pair:      res.pair,
-        spreadBps: res.spreadBps,
-        buyDex:    res.buyDex,
-        sellDex:   res.sellDex,
-        hasOpp:    !!res.opportunity,
+        pair:         res.pair,
+        spreadBps:    res.spreadBps,
+        buyDex:       res.buyDex,
+        sellDex:      res.sellDex,
+        filterResult: res.filterResult,
+        hasOpp:       !!res.opportunity,
       });
+
+      // Anomaly: |spread| > 2000bps — log as anomaly, not a skip
+      if (res.filterResult === 'anomaly') {
+        logRejection({ strategyId, blockNumber, pair: res.pair, reason: `anomaly spread=${res.spreadBps}bps` });
+        captureDetected({
+          opportunityId: `aero-${res.pair}-${blockNumber}-anomaly`,
+          strategyId,
+          block:         blockNumber,
+          path:          res.pair,
+          spreadBps:     res.spreadBps,
+          grossUsd:      0,
+          netUsd:        0,
+          loanSize:      res.loanAmount.toString(),
+          filterResult:  'anomaly',
+          skipReason:    `spread=${res.spreadBps}bps exceeds ±2000bps anomaly gate`,
+        });
+        continue;
+      }
 
       if (!res.opportunity) {
         const skipReason = `spread=${res.spreadBps}bps below threshold`;

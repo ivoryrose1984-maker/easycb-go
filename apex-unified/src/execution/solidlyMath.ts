@@ -82,3 +82,20 @@ export function getAmountOutStable(
   const amountOut = (y0Norm - y1Norm) * scaleOut / SCALE;
   return amountOut > reserveOut ? 0n : amountOut;
 }
+
+// ── getAmountOutVolatile ───────────────────────────────────────────────────────
+// Off-chain quote for a single Aerodrome volatile pool hop (x·y=k).
+// Same formula as Uniswap V2: dy = γ·amountIn·reserveOut / (reserveIn + γ·amountIn)
+// No decimal normalization needed — reserves and amountIn share the same unit.
+//
+// @param feeBps  Pool fee in bps (default 30 = 0.3% for Aerodrome volatile)
+export function getAmountOutVolatile(
+  amountIn:   bigint,
+  reserveIn:  bigint,
+  reserveOut: bigint,
+  feeBps = 30n,
+): bigint {
+  if (amountIn === 0n || reserveIn === 0n || reserveOut === 0n) return 0n;
+  const amountInFee = amountIn * (10_000n - feeBps) / 10_000n;
+  return amountInFee * reserveOut / (reserveIn + amountInFee);
+}

@@ -3,11 +3,18 @@ import CONFIG, { usdcToUsd } from '../core/config';
 import { Opportunity } from '../types/Opportunity';
 import { opportunityHash } from '../core/dedup';
 import { logger } from '../core/logger';
+import { getAmountOutStable, getAmountOutVolatile } from '../execution/solidlyMath';
 
-// Aerodrome V1 (Solidly fork) router — route struct has no factory field.
-// V2 router (0x6Cb…) uses a different struct; this address is V1 only.
-const AERODROME_ROUTER_ABI = [
-  'function getAmountsOut(uint256 amountIn, (address from, address to, bool stable)[] routes) view returns (uint256[] amounts)',
+// Direct pool reads — bypasses V1/V2 router ABI mismatch entirely.
+// V2 router (0xcF77a…) uses (from,to,stable,factory) struct; V1 uses (from,to,stable).
+// Fetching reserves directly and computing off-chain avoids the mismatch.
+const FACTORY_ABI = [
+  'function getPool(address tokenA, address tokenB, bool stable) view returns (address)',
+];
+
+const POOL_ABI = [
+  'function getReserves() view returns (uint256 reserve0, uint256 reserve1, uint256 blockTimestampLast)',
+  'function token0() view returns (address)',
 ];
 
 const UNI_QUOTER_ABI = [
@@ -16,25 +23,94 @@ const UNI_QUOTER_ABI = [
 
 const UNI_FEES = [100, 500, 3000, 10000];
 
+// Stable pool: 0.05% default; volatile: 0.3% default (Aerodrome V2 standard)
+const STABLE_FEE_BPS   = 5n;
+const VOLATILE_FEE_BPS = 30n;
+
+// Hardcoded — no RPC needed for token decimal lookup
+const TOKEN_DECIMALS: Record<string, number> = {
+  [CONFIG.TOKENS.USDC.toLowerCase()]:  6,
+  [CONFIG.TOKENS.USDbC.toLowerCase()]: 6,
+  [CONFIG.TOKENS.USDT.toLowerCase()]:  6,
+  [CONFIG.TOKENS.DAI.toLowerCase()]:   18,
+  [CONFIG.TOKENS.WETH.toLowerCase()]:  18,
+  [CONFIG.TOKENS.cbETH.toLowerCase()]: 18,
+  [CONFIG.TOKENS.AERO.toLowerCase()]:  18,
+};
+
+// |spread| > 2000bps = anomaly (stale reserves, thin pool, data artifact — not real arb)
+const ANOMALY_THRESHOLD_BPS = 2_000;
+
 export interface AerodromeSpreadResult {
-  pair:        string;
-  tokenIn:     string;
-  tokenOut:    string;
-  buyDex:      string;
-  sellDex:     string;
-  spreadBps:   number;
-  loanAmount:  bigint;
-  grossProfit: bigint;
-  opportunity: Opportunity | null;
+  pair:         string;
+  tokenIn:      string;
+  tokenOut:     string;
+  buyDex:       string;
+  sellDex:      string;
+  spreadBps:    number;
+  loanAmount:   bigint;
+  grossProfit:  bigint;
+  opportunity:  Opportunity | null;
+  filterResult: 'pass' | 'skip' | 'anomaly';
 }
 
 export class AerodromeSignal {
-  private router:    ethers.Contract;
-  private uniQuoter: ethers.Contract;
+  private readonly factory:   ethers.Contract;
+  private readonly uniQuoter: ethers.Contract;
+  private readonly provider:  ethers.Provider;
+
+  // Pool address cache — factory calls are stable; no need to re-fetch each block.
+  private readonly poolCache = new Map<string, string>();
 
   constructor(provider: ethers.Provider) {
-    this.router    = new ethers.Contract(CONFIG.CONTRACTS.AERODROME_ROUTER, AERODROME_ROUTER_ABI, provider);
-    this.uniQuoter = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER,       UNI_QUOTER_ABI,       provider);
+    this.provider  = provider;
+    this.factory   = new ethers.Contract(CONFIG.CONTRACTS.AERODROME_FACTORY, FACTORY_ABI, provider);
+    this.uniQuoter = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER,        UNI_QUOTER_ABI, provider);
+  }
+
+  private async getPoolAddress(tokenA: string, tokenB: string, stable: boolean): Promise<string | null> {
+    const key = `${tokenA.toLowerCase()}:${tokenB.toLowerCase()}:${stable}`;
+    const cached = this.poolCache.get(key);
+    if (cached) return cached;
+    try {
+      const addr = await this.factory.getPool(tokenA, tokenB, stable) as string;
+      if (!addr || addr === ethers.ZeroAddress) return null;
+      this.poolCache.set(key, addr);
+      return addr;
+    } catch {
+      return null;
+    }
+  }
+
+  private async getAeroQuote(
+    tokenIn:  string,
+    tokenOut: string,
+    stable:   boolean,
+    amountIn: bigint,
+  ): Promise<bigint> {
+    const poolAddr = await this.getPoolAddress(tokenIn, tokenOut, stable);
+    if (!poolAddr) return 0n;
+
+    try {
+      const pool = new ethers.Contract(poolAddr, POOL_ABI, this.provider);
+      const [[r0, r1], tok0] = await Promise.all([
+        pool.getReserves() as Promise<[bigint, bigint, bigint]>,
+        pool.token0()      as Promise<string>,
+      ]);
+
+      const isToken0In = tokenIn.toLowerCase() === tok0.toLowerCase();
+      const reserveIn  = isToken0In ? r0 : r1;
+      const reserveOut = isToken0In ? r1 : r0;
+
+      if (stable) {
+        const decIn  = TOKEN_DECIMALS[tokenIn.toLowerCase()]  ?? 18;
+        const decOut = TOKEN_DECIMALS[tokenOut.toLowerCase()] ?? 18;
+        return getAmountOutStable(amountIn, reserveIn, reserveOut, decIn, decOut, STABLE_FEE_BPS);
+      }
+      return getAmountOutVolatile(amountIn, reserveIn, reserveOut, VOLATILE_FEE_BPS);
+    } catch {
+      return 0n;
+    }
   }
 
   async scan(
@@ -44,11 +120,9 @@ export class AerodromeSignal {
     ethPriceUsd: bigint = 3_000_000_000n,
   ): Promise<AerodromeSpreadResult | null> {
     try {
-      // ── Phase 1: buy quotes tokenIn → tokenOut (Aerodrome + Uni V3) ──
+      // ── Buy leg: tokenIn → tokenOut (Aerodrome off-chain + Uni V3) ──────────
       const [aeroBuyOut, uniBuyRaw] = await Promise.all([
-        this.router.getAmountsOut(loanAmount, [{
-          from: pair.tokenIn, to: pair.tokenOut, stable: pair.stable,
-        }]).then((a: bigint[]) => a[1]).catch(() => 0n),
+        this.getAeroQuote(pair.tokenIn, pair.tokenOut, pair.stable, loanAmount),
         Promise.all(UNI_FEES.map(fee =>
           this.uniQuoter.quoteExactInputSingle.staticCall({
             tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
@@ -60,19 +134,16 @@ export class AerodromeSignal {
       const bestUniBuy    = uniBuyRaw.reduce((a, b) => b > a ? b : a, 0n);
       const bestUniBuyFee = UNI_FEES[uniBuyRaw.indexOf(bestUniBuy)] ?? 3000;
 
-      const buyOnAero = aeroBuyOut > bestUniBuy && aeroBuyOut > 0n;
+      const buyOnAero  = aeroBuyOut > bestUniBuy && aeroBuyOut > 0n;
       const bestBuyOut = buyOnAero ? aeroBuyOut : bestUniBuy;
       const bestBuyDex = buyOnAero ? 'aerodrome' : `uni-v3@${bestUniBuyFee}`;
 
       if (bestBuyOut === 0n) return null;
 
-      // ── Phase 2: sell quotes tokenOut → tokenIn (Aerodrome + Uni V3) ──
+      // ── Sell leg: tokenOut → tokenIn (Aerodrome off-chain + Uni V3) ─────────
       const [aeroSellOut, uniSellRaw] = await Promise.all([
-        this.router.getAmountsOut(bestBuyOut, [{
-          from: pair.tokenOut, to: pair.tokenIn, stable: pair.stable,
-        }]).then((a: bigint[]) => a[1]).catch(() => 0n),
+        this.getAeroQuote(pair.tokenOut, pair.tokenIn, pair.stable, bestBuyOut),
         Promise.all(UNI_FEES.map(fee => {
-          // Skip the same pool if we bought on Uni V3
           if (!buyOnAero && fee === bestUniBuyFee) return Promise.resolve(0n);
           return this.uniQuoter.quoteExactInputSingle.staticCall({
             tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
@@ -84,19 +155,30 @@ export class AerodromeSignal {
       const bestUniSell    = uniSellRaw.reduce((a, b) => b > a ? b : a, 0n);
       const bestUniSellFee = UNI_FEES[uniSellRaw.indexOf(bestUniSell)] ?? 3000;
 
-      const sellOnAero = aeroSellOut > bestUniSell && aeroSellOut > 0n;
+      const sellOnAero  = aeroSellOut > bestUniSell && aeroSellOut > 0n;
       const bestSellOut = sellOnAero ? aeroSellOut : bestUniSell;
       const bestSellDex = sellOnAero ? 'aerodrome' : `uni-v3@${bestUniSellFee}`;
 
       if (bestSellOut === 0n) return null;
 
-      // Reject same-DEX round-trips (no cross-DEX edge — already covered by dexSpreadSignal)
+      // Reject same-DEX round-trips — no cross-DEX edge
       if (bestBuyDex.startsWith('uni-v3') && bestSellDex.startsWith('uni-v3')) return null;
-      if (bestBuyDex === 'aerodrome' && bestSellDex === 'aerodrome') return null;
+      if (bestBuyDex === 'aerodrome'       && bestSellDex === 'aerodrome')       return null;
 
       const spreadBps = loanAmount > 0n
         ? Number(((bestSellOut - loanAmount) * 10_000n) / loanAmount)
         : 0;
+
+      // ── Anomaly gate ─────────────────────────────────────────────────────────
+      if (Math.abs(spreadBps) > ANOMALY_THRESHOLD_BPS) {
+        logger.debug('AERO', `${pair.name} anomaly spread=${spreadBps}bps (gate: ±${ANOMALY_THRESHOLD_BPS}bps)`);
+        return {
+          pair: pair.name, tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
+          buyDex: bestBuyDex, sellDex: bestSellDex,
+          spreadBps, loanAmount, grossProfit: 0n, opportunity: null,
+          filterResult: 'anomaly',
+        };
+      }
 
       const isOpportunity = spreadBps >= CONFIG.MIN_PROFIT_BPS;
 
@@ -110,9 +192,7 @@ export class AerodromeSignal {
         quotedOutput: bestSellOut.toString(),
       });
 
-      logger.debug('AERO',
-        `${pair.name} spread=${spreadBps}bps buy=${bestBuyDex} sell=${bestSellDex}`
-      );
+      logger.debug('AERO', `${pair.name} spread=${spreadBps}bps buy=${bestBuyDex} sell=${bestSellDex}`);
 
       const grossProfitRaw = bestSellOut > loanAmount ? bestSellOut - loanAmount : 0n;
       const isWethIn = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.WETH.toLowerCase();
@@ -163,6 +243,7 @@ export class AerodromeSignal {
         loanAmount,
         grossProfit: grossProfitRaw,
         opportunity: isOpportunity ? opp : null,
+        filterResult: isOpportunity ? 'pass' : 'skip',
       };
     } catch (err: any) {
       logger.debug('AERO', `${pair.name} scan error: ${err.message}`);
