@@ -3,6 +3,7 @@ import CONFIG from '../core/config';
 import { bigintSqrt, optimalInputCFMM, maxGrossEdgeBps } from '../execution/flashLoanPlanner';
 import { packMinAmountOut } from '../execution/FastPathExecutor';
 import { encode2HopPath, encode3HopPath } from '../execution/routePlanner';
+import { solidlyF, solidlyD, solidlyGetY, getAmountOutStable } from '../execution/solidlyMath';
 import { ethers }                          from 'ethers';
 
 // ── usdcToUsd ─────────────────────────────────────────────────────────────────
@@ -320,5 +321,148 @@ describe('encode2HopPath', () => {
     const three = encode3HopPath(USDC, 500, WETH, 3000, cbETH, 500, USDC);
     // Different lengths
     expect(two.length).not.toBe(three.length);
+  });
+});
+
+// ── solidlyF / solidlyD ───────────────────────────────────────────────────────
+
+const S = 10n ** 18n; // 1e18 scale
+
+describe('solidlyF', () => {
+  it('f(x,x) = 2x^4 / 1e54 (symmetric pool)', () => {
+    const x = 1_000n * S; // 1000 tokens normalized
+    const result = solidlyF(x, x);
+    // f(x,x) = x·x³ + x³·x = 2x⁴ (in scaled space)
+    // = 2 * (1000)^4 * S^4 / (S^3) = 2 * 1e12 * S
+    const expected = 2n * 1_000n ** 4n * S;
+    expect(result).toBe(expected);
+  });
+
+  it('f(0, y) = 0', () => {
+    expect(solidlyF(0n, 1_000n * S)).toBe(0n);
+  });
+
+  it('f(x, 0) = 0', () => {
+    expect(solidlyF(1_000n * S, 0n)).toBe(0n);
+  });
+});
+
+describe('solidlyD', () => {
+  it('d(x,x) = 4x^3 / 1e36 (symmetric pool)', () => {
+    const x = 1_000n * S;
+    const result = solidlyD(x, x);
+    // d(x,x) = 3x·x² + x³ = 4x³ (in scaled space)
+    const expected = 4n * 1_000n ** 3n * S;
+    expect(result).toBe(expected);
+  });
+
+  it('d(0, y) = 0', () => {
+    expect(solidlyD(0n, 1_000n * S)).toBe(0n);
+  });
+});
+
+// ── solidlyGetY convergence ───────────────────────────────────────────────────
+
+describe('solidlyGetY', () => {
+  it('recovers y0 when x0 is unchanged (identity check)', () => {
+    const x0 = 1_000n * S;
+    const y0 = 1_000n * S;
+    const xy = solidlyF(x0, y0);
+    const recovered = solidlyGetY(x0, xy, y0);
+    // Should converge to within 1 wei of y0
+    const diff = recovered > y0 ? recovered - y0 : y0 - recovered;
+    expect(diff).toBeLessThanOrEqual(1n);
+  });
+
+  it('gives lower y when x increases (pool sells out tokenOut)', () => {
+    const x0 = 1_000n * S;
+    const y0 = 1_000n * S;
+    const xy   = solidlyF(x0, y0);
+    const x1   = x0 + 10n * S; // add 10 tokens
+    const y1   = solidlyGetY(x1, xy, y0);
+    expect(y1).toBeLessThan(y0);
+  });
+});
+
+// ── getAmountOutStable ────────────────────────────────────────────────────────
+
+describe('getAmountOutStable', () => {
+  it('returns 0 for zero amountIn', () => {
+    expect(getAmountOutStable(0n, 1_000_000n, 1_000_000n, 6, 6)).toBe(0n);
+  });
+
+  it('returns 0 for zero reserves', () => {
+    expect(getAmountOutStable(1_000n, 0n, 1_000_000n, 6, 6)).toBe(0n);
+    expect(getAmountOutStable(1_000n, 1_000_000n, 0n, 6, 6)).toBe(0n);
+  });
+
+  it('USDC→DAI (6-dec → 18-dec): symmetric 1:1 stable pool returns ~amountIn', () => {
+    // Simulate a large balanced USDC/DAI stable pool
+    const reserveUSDC = 5_000_000n * 10n ** 6n;  // 5M USDC (6-dec)
+    const reserveDAI  = 5_000_000n * 10n ** 18n; // 5M DAI  (18-dec)
+    const amountIn    = 1_000n * 10n ** 6n;       // 1000 USDC
+    const amountOut   = getAmountOutStable(amountIn, reserveUSDC, reserveDAI, 6, 18);
+    // With 0.05% fee and deep pool: output should be ~999.5 DAI = ~999.5e18 raw units
+    const outDai = Number(amountOut) / 1e18;
+    expect(outDai).toBeGreaterThan(999.0);
+    expect(outDai).toBeLessThan(1000.0);
+  });
+
+  it('DAI→USDC (18-dec → 6-dec): decimal normalization round-trip', () => {
+    // Same pool flipped
+    const reserveDAI  = 5_000_000n * 10n ** 18n;
+    const reserveUSDC = 5_000_000n * 10n ** 6n;
+    const amountIn    = 1_000n * 10n ** 18n;       // 1000 DAI
+    const amountOut   = getAmountOutStable(amountIn, reserveDAI, reserveUSDC, 18, 6);
+    const outUsdc = Number(amountOut) / 1e6;
+    expect(outUsdc).toBeGreaterThan(999.0);
+    expect(outUsdc).toBeLessThan(1000.0);
+  });
+
+  it('USDC→USDC same-dec pool (6→6): output ~amountIn minus fee', () => {
+    // USDbC/USDC style — same decimals
+    const reserve = 10_000_000n * 10n ** 6n; // 10M each
+    const amountIn = 1_000n * 10n ** 6n;
+    const amountOut = getAmountOutStable(amountIn, reserve, reserve, 6, 6);
+    const out = Number(amountOut) / 1e6;
+    // ~999.5 USDC (0.05% fee on deep pool)
+    expect(out).toBeGreaterThan(999.0);
+    expect(out).toBeLessThan(1000.0);
+  });
+
+  it('large 18-dec / 18-dec pool (WETH/cbETH style): output ~amountIn', () => {
+    // cbETH and WETH both 18-dec; cbETH ~= WETH (ratio ~1.065 but near 1)
+    const reserveWETH  = 1_000n * 10n ** 18n; // 1000 WETH
+    const reservecbETH = 1_000n * 10n ** 18n; // 1000 cbETH
+    const amountIn     = 1n   * 10n ** 18n;   // 1 WETH
+    const amountOut = getAmountOutStable(amountIn, reserveWETH, reservecbETH, 18, 18);
+    // ~0.9995 cbETH due to 0.05% fee
+    const out = Number(amountOut) / 1e18;
+    expect(out).toBeGreaterThan(0.999);
+    expect(out).toBeLessThan(1.001);
+  });
+
+  it('tiny pool (10 tokens each): price impact is large', () => {
+    // Swap 5 USDC into a pool of only 10 USDC / 10 DAI — expect heavy impact
+    const reserveUSDC = 10n * 10n ** 6n;
+    const reserveDAI  = 10n * 10n ** 18n;
+    const amountIn    = 5n  * 10n ** 6n; // 50% of pool
+    const amountOut   = getAmountOutStable(amountIn, reserveUSDC, reserveDAI, 6, 18);
+    const outDai = Number(amountOut) / 1e18;
+    // Stable curve is flatter than xy=k but still has significant impact at 50% of pool
+    expect(outDai).toBeGreaterThan(0);
+    expect(outDai).toBeLessThan(5.0); // less than 1:1 due to price impact
+  });
+
+  it('6-dec input vs 18-dec: wrong decimals produce wildly wrong results (regression)', () => {
+    // Confirm that swapping dec args produces a nonsensical (very large) result
+    // This is a decimal-normalization guard: the correct call uses (6,18), wrong is (18,6)
+    const reserveUSDC = 5_000_000n * 10n ** 6n;
+    const reserveDAI  = 5_000_000n * 10n ** 18n;
+    const amountIn    = 1_000n * 10n ** 6n;
+    const correctOut  = getAmountOutStable(amountIn, reserveUSDC, reserveDAI, 6, 18);
+    const wrongOut    = getAmountOutStable(amountIn, reserveUSDC, reserveDAI, 18, 6);
+    // Correct: ~999.5e18 raw DAI; wrong: will either be 0 or wildly different
+    expect(correctOut).not.toBe(wrongOut);
   });
 });
