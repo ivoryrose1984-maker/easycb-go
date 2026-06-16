@@ -34,8 +34,8 @@ const STALE_RATE_SECS  = 90_000;
 // Only used if Chainlink + cache both fail — logs ERROR every block it's used
 const CBETH_FALLBACK_RATE = 1_065_000_000_000_000_000n; // 1.065e18
 
-const PROBE_WETH = ethers.parseEther('3.33');
-const FEE_TIERS  = [500, 100, 3000] as const;
+const PROBE_WETH = ethers.parseEther('0.5');   // reduced from 3.33 — avoids thin-pool revert
+const FEE_TIERS  = [500, 100, 3000, 10000] as const;
 
 export interface CbEthSignalResult {
   opportunity:  Opportunity | null;
@@ -148,6 +148,7 @@ export class CbEthFairValueSignal {
     let dexWethOut: bigint | null = null;
     let feeTierUsed = 0;
 
+    const quoterErrors: string[] = [];
     for (const fee of FEE_TIERS) {
       try {
         const [amountOut] = await this.quoter.quoteExactInputSingle.staticCall({
@@ -160,7 +161,13 @@ export class CbEthFairValueSignal {
         dexWethOut  = amountOut as bigint;
         feeTierUsed = fee;
         break;
-      } catch { continue; }
+      } catch (e: any) {
+        quoterErrors.push(`fee${fee}:${e?.code ?? e?.message?.slice(0, 40) ?? 'unknown'}`);
+        continue;
+      }
+    }
+    if (dexWethOut === null && quoterErrors.length > 0) {
+      logger.warn('cbETH', `Quoter failed all fee tiers: ${quoterErrors.join(' | ')}`);
     }
 
     if (dexWethOut === null) {
