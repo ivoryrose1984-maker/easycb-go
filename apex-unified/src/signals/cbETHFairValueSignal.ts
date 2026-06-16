@@ -1,6 +1,6 @@
 import { ethers }    from 'ethers';
 import CONFIG         from '../core/config';
-import { getCexFeed } from './cexContextSignal';
+import { getCexFeed, getCoinGeckoPrice } from './cexContextSignal';
 import { getCompetitionWindow, adjustedThreshold } from '../core/clock';
 import { Opportunity } from '../types/Opportunity';
 import { opportunityHash } from '../core/dedup';
@@ -156,8 +156,10 @@ export class CbEthFairValueSignal {
     const dexWethPerCbEth = Number(dexWethOut) / Number(PROBE_WETH);
     const grossEdgeBps    = ((dexWethPerCbEth - fairWethPerCbEth) / fairWethPerCbEth) * 10_000;
 
-    const cex        = getCexFeed();
-    const cexEthMid  = cex.getMid('ethusdc');
+    const cex           = getCexFeed();
+    const binanceEthMid = cex.getMid('ethusdc');
+    // CoinGecko fallback when Binance is geo-blocked or disabled (30s cache, no auth)
+    const cexEthMid = binanceEthMid ?? (await getCoinGeckoPrice())?.ethUsd ?? null;
     const window     = getCompetitionWindow();
     const threshold  = adjustedThreshold(CONFIG.MIN_NET_EDGE_BPS);
 

@@ -122,3 +122,37 @@ export function destroyCexFeed(): void {
   _feed?.destroy();
   _feed = null;
 }
+
+// ── CoinGecko REST price feed ─────────────────────────────────────────────────
+// Polled on-demand with a 30s in-memory cache.
+// Used as ETH/cbETH price source when Binance is disabled (geo-block or ENABLE_BINANCE=false).
+// No API key required, no geo-restrictions on Hetzner.
+
+const COINGECKO_URL =
+  'https://api.coingecko.com/api/v3/simple/price' +
+  '?ids=ethereum,coinbase-wrapped-staked-eth&vs_currencies=usd';
+
+const CG_CACHE_MS = 30_000;
+
+interface CgCache { ethUsd: number; cbethUsd: number; cbethRatio: number; fetchedAt: number }
+let _cgCache: CgCache | null = null;
+
+export async function getCoinGeckoPrice(): Promise<{ ethUsd: number; cbethUsd: number; cbethRatio: number } | null> {
+  if (_cgCache && Date.now() - _cgCache.fetchedAt < CG_CACHE_MS) {
+    return { ethUsd: _cgCache.ethUsd, cbethUsd: _cgCache.cbethUsd, cbethRatio: _cgCache.cbethRatio };
+  }
+  try {
+    const res = await fetch(COINGECKO_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json() as Record<string, { usd: number }>;
+    const ethUsd   = data['ethereum']?.usd;
+    const cbethUsd = data['coinbase-wrapped-staked-eth']?.usd;
+    if (!ethUsd || !cbethUsd) throw new Error('Missing price fields');
+    _cgCache = { ethUsd, cbethUsd, cbethRatio: cbethUsd / ethUsd, fetchedAt: Date.now() };
+    return { ethUsd: _cgCache.ethUsd, cbethUsd: _cgCache.cbethUsd, cbethRatio: _cgCache.cbethRatio };
+  } catch (err: any) {
+    logger.warn('CEX', `CoinGecko fetch failed: ${err.message}${_cgCache ? ' — using stale cache' : ''}`);
+    if (_cgCache) return { ethUsd: _cgCache.ethUsd, cbethUsd: _cgCache.cbethUsd, cbethRatio: _cgCache.cbethRatio };
+    return null;
+  }
+}
