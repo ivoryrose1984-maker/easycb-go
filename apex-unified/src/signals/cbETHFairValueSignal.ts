@@ -11,11 +11,12 @@ import { logger } from '../core/logger';
 // Source priority:
 //   1. cbETH contract exchangeRate() — only works on Ethereum L1; always fails on Base
 //   2. Chainlink cbETH/USD ÷ ETH/USD → cbETH/ETH ratio (both 8-dec, 24h heartbeat)
-//   3. In-memory cache from last successful call (survives short Chainlink outages)
-//   4. Hardcoded constant — absolute last resort, logs ERROR, signal unreliable
+//   3. CoinGecko cbETH/USD ÷ ETH/USD (30s REST cache, no geo-block, no auth)
+//   4. In-memory cache from last successful call (survives outages)
+//   5. Hardcoded constant — absolute last resort, logs ERROR, signal unreliable
 //
-// Base mainnet Chainlink feeds (verified):
-//   cbETH/USD: 0xd7818272B9e248357d13057AAb0B417aF31E817d
+// Base mainnet Chainlink feeds:
+//   cbETH/USD: 0xd7818272B9e248357d13057AAb0B417aF31E817d  (may be deprecated)
 //   ETH/USD:   0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70
 const CHAINLINK_CBETH_USD = '0xd7818272B9e248357d13057AAb0B417aF31E817d';
 const CHAINLINK_ETH_USD   = '0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70';
@@ -97,15 +98,29 @@ class CbEthRateOracle {
       logger.warn('cbETH', `Chainlink feed error: ${err.message}`);
     }
 
-    // 3. In-memory cache from last successful call
+    // 3. CoinGecko cbETH/USD ÷ ETH/USD (30s REST cache, no geo-block)
+    try {
+      const cg = await getCoinGeckoPrice();
+      if (cg && cg.cbethRatio > 0) {
+        const rate = BigInt(Math.round(cg.cbethRatio * 1e18));
+        this.cachedRate = rate;
+        this.cachedAt   = Date.now();
+        logger.info('cbETH', `Exchange rate from CoinGecko: ${cg.cbethRatio.toFixed(6)} (cbETH=$${cg.cbethUsd.toFixed(2)}, ETH=$${cg.ethUsd.toFixed(2)})`);
+        return { rate, source: 'coingecko' };
+      }
+    } catch (err: any) {
+      logger.warn('cbETH', `CoinGecko rate error: ${err.message}`);
+    }
+
+    // 4. In-memory cache from last successful call
     if (this.cachedRate !== null) {
       const ageMin = Math.round((Date.now() - this.cachedAt) / 60_000);
       logger.warn('cbETH', `Using cached exchange rate (age=${ageMin}m)`);
       return { rate: this.cachedRate, source: `cache (age=${ageMin}m)` };
     }
 
-    // 4. Hardcoded constant — loud error, signal data is unreliable
-    logger.error('cbETH', 'All rate sources failed — using hardcoded fallback. cbETH signal is UNRELIABLE. Check Chainlink feed.');
+    // 5. Hardcoded constant — loud error, signal data is unreliable
+    logger.error('cbETH', 'All rate sources failed — using hardcoded fallback. cbETH signal is UNRELIABLE.');
     return { rate: CBETH_FALLBACK_RATE, source: 'HARDCODED_FALLBACK' };
   }
 }
