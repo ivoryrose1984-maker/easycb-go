@@ -190,6 +190,13 @@ export class CbEthFairValueSignal {
     const dexWethPerCbEth = Number(resolvedOut) / Number(PROBE_WETH);
     const grossEdgeBps    = ((dexWethPerCbEth - fairWethPerCbEth) / fairWethPerCbEth) * 10_000;
 
+    // Anomaly gate: cbETH/WETH should never deviate more than 200bps from fair value.
+    // Larger deviations = thin-pool price impact artifact, not a real signal.
+    if (Math.abs(grossEdgeBps) > 200) {
+      logger.debug('cbETH', `block=${blockNumber} anomaly gross=${grossEdgeBps.toFixed(2)}bps (${dexSource}@${feeTierUsed}) — thin pool, skipping`);
+      return null;
+    }
+
     const cex           = getCexFeed();
     const binanceEthMid = cex.getMid('ethusdc');
     // CoinGecko fallback when Binance is geo-blocked or disabled (30s cache, no auth)
