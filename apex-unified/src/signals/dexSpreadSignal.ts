@@ -135,10 +135,15 @@ export class DexSpreadSignal {
         })),
       ]);
 
+      // Floor: reject sell quotes returning < 50% of loanAmount.
+      // Prevents dust-winning races where the deep pool times out and a thin
+      // pool returns near-zero, producing fake -9000bps spreads that pollute
+      // the anomaly log and bias the capture-rate metric.
+      const sellFloor = loanAmount / 2n;
       const sellQuotes: QuoteCandidate[] = [
         ...UNI_FEES.map((fee, i)  => ({ dex: 'uni-v3'  as DexId, fee, out: uniSellRaw[i] })),
         ...CAKE_FEES.map((fee, i) => ({ dex: 'cake-v3' as DexId, fee, out: cakeSellRaw[i] })),
-      ].filter(q => q.out > 0n);
+      ].filter(q => q.out >= sellFloor);
 
       if (sellQuotes.length === 0) return null;
       const bestSell = sellQuotes.reduce((a, b) => b.out > a.out ? b : a);
