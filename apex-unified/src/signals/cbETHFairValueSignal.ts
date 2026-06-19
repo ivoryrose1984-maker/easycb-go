@@ -126,12 +126,14 @@ class CbEthRateOracle {
 }
 
 export class CbEthFairValueSignal {
-  private oracle: CbEthRateOracle;
-  private quoter: ethers.Contract;
+  private oracle:      CbEthRateOracle;
+  private uniQuoter:  ethers.Contract;
+  private cakeQuoter: ethers.Contract;
 
   constructor(provider: ethers.Provider) {
-    this.oracle = new CbEthRateOracle(provider);
-    this.quoter = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER, QUOTER_ABI, provider);
+    this.oracle      = new CbEthRateOracle(provider);
+    this.uniQuoter  = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER,  QUOTER_ABI, provider);
+    this.cakeQuoter = new ethers.Contract(CONFIG.CONTRACTS.CAKE_QUOTER, QUOTER_ABI, provider);
   }
 
   async scan(provider: ethers.Provider, blockNumber: number): Promise<CbEthSignalResult | null> {
@@ -147,35 +149,45 @@ export class CbEthFairValueSignal {
 
     let dexWethOut: bigint | null = null;
     let feeTierUsed = 0;
+    let dexSource = 'uni-v3';
 
-    const quoterErrors: string[] = [];
-    for (const fee of FEE_TIERS) {
-      try {
-        const [amountOut] = await this.quoter.quoteExactInputSingle.staticCall({
-          tokenIn:           CONFIG.TOKENS.cbETH,
-          tokenOut:          CONFIG.TOKENS.WETH,
-          amountIn:          PROBE_WETH,
-          fee,
-          sqrtPriceLimitX96: 0n,
-        });
-        dexWethOut  = amountOut as bigint;
-        feeTierUsed = fee;
-        break;
-      } catch (e: any) {
-        quoterErrors.push(`fee${fee}:${e?.code ?? e?.message?.slice(0, 40) ?? 'unknown'}`);
-        continue;
+    const tryQuoter = async (quoter: ethers.Contract, label: string): Promise<string[]> => {
+      const errs: string[] = [];
+      for (const fee of FEE_TIERS) {
+        try {
+          const [amountOut] = await quoter.quoteExactInputSingle.staticCall({
+            tokenIn:           CONFIG.TOKENS.cbETH,
+            tokenOut:          CONFIG.TOKENS.WETH,
+            amountIn:          PROBE_WETH,
+            fee,
+            sqrtPriceLimitX96: 0n,
+          });
+          dexWethOut  = amountOut as bigint;
+          feeTierUsed = fee;
+          dexSource   = label;
+          return [];
+        } catch (e: any) {
+          errs.push(`${label}@${fee}:${e?.code ?? e?.message?.slice(0, 40) ?? 'unknown'}`);
+        }
       }
-    }
-    if (dexWethOut === null && quoterErrors.length > 0) {
-      logger.warn('cbETH', `Quoter failed all fee tiers: ${quoterErrors.join(' | ')}`);
+      return errs;
+    };
+
+    const uniErrs  = await tryQuoter(this.uniQuoter,  'uni-v3');
+    const cakeErrs = dexWethOut === null ? await tryQuoter(this.cakeQuoter, 'cake-v3') : [];
+    const allErrors = [...uniErrs, ...cakeErrs];
+
+    if (dexWethOut === null && allErrors.length > 0) {
+      logger.warn('cbETH', `Quoter failed all fee tiers: ${allErrors.join(' | ')}`);
     }
 
     if (dexWethOut === null) {
       logger.warn('cbETH', 'No DEX quote available — skipping block');
       return null;
     }
+    const resolvedOut = dexWethOut as bigint; // async closure mutation — TypeScript can't narrow, cast required
 
-    const dexWethPerCbEth = Number(dexWethOut) / Number(PROBE_WETH);
+    const dexWethPerCbEth = Number(resolvedOut) / Number(PROBE_WETH);
     const grossEdgeBps    = ((dexWethPerCbEth - fairWethPerCbEth) / fairWethPerCbEth) * 10_000;
 
     const cex           = getCexFeed();
@@ -198,7 +210,7 @@ export class CbEthFairValueSignal {
       tokenIn:      CONFIG.TOKENS.cbETH,
       tokenOut:     CONFIG.TOKENS.WETH,
       quotedInput:  PROBE_WETH.toString(),
-      quotedOutput: dexWethOut.toString(),
+      quotedOutput: resolvedOut.toString(),
     });
 
     const isOpportunity = netEdgeBps >= threshold;
@@ -211,7 +223,7 @@ export class CbEthFairValueSignal {
     const netProfitUsd   = parseFloat(Math.max(0, grossProfitUsd - gasUsd - grossProfitUsd * (CONFIG.FLASH_LOAN_FEE_BPS / 10_000)).toFixed(4));
 
     logger.debug('cbETH',
-      `block=${blockNumber} rate=${fairWethPerCbEth.toFixed(6)} source=${rateSource} ` +
+      `block=${blockNumber} rate=${fairWethPerCbEth.toFixed(6)} source=${rateSource} dex=${dexSource}@${feeTierUsed} ` +
       `gross=${grossEdgeBps.toFixed(2)}bps net=${netEdgeBps.toFixed(2)}bps ` +
       `grossUsd=$${grossProfitUsd.toFixed(2)} thresh=${threshold.toFixed(2)}bps latency=${rpcLatencyMs}ms`
     );
@@ -226,11 +238,11 @@ export class CbEthFairValueSignal {
       opportunityHash:  hash,
       tokenIn:          CONFIG.TOKENS.cbETH,
       tokenOut:         CONFIG.TOKENS.WETH,
-      route:            `cbETH→WETH (fee=${feeTierUsed})`,
-      dex:              'uniswap-v3',
+      route:            `cbETH→WETH (${dexSource}@${feeTierUsed})`,
+      dex:              dexSource,
       feeTier:          feeTierUsed,
       quotedInput:      PROBE_WETH.toString(),
-      quotedOutput:     dexWethOut.toString(),
+      quotedOutput:     resolvedOut.toString(),
       fairValuePrice:   fairWethPerCbEth,
       dexPrice:         dexWethPerCbEth,
       cexPrice:         cexEthMid,
