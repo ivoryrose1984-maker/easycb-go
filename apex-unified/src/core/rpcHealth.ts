@@ -25,8 +25,8 @@ class RpcHealthMonitor {
     this.transition('THROTTLED');
     this.scheduleAutoReset();
     logger.warn('RPC_HEALTH',
-      `429 rate-limit — non-critical scans paused for ${THROTTLE_PAUSE_MS / 1_000}s ` +
-      `(free alternative: set ALCHEMY_WSS_URL=wss://base.drpc.org in .env)`
+      `Rate-limit (code 15 / 429) — non-critical scans paused ${THROTTLE_PAUSE_MS / 1_000}s; ` +
+      `RWS will back off ≥15s before reconnect`
     );
   }
 

@@ -21,8 +21,16 @@ export class ResilientWsProvider {
 
   private static readonly BASE_DELAY_MS             = 1_000;
   private static readonly MAX_DELAY_MS              = 60_000;
-  private static readonly RATE_LIMIT_FLOOR_MS       = 10_000;
+  private static readonly RATE_LIMIT_FLOOR_MS       = 15_000;  // increased: 10s wasn't enough for drpc.org
   private static readonly MAX_CONSECUTIVE_FAILURES  = 20;
+
+  // drpc.org returns code 15 "Too many request" — not the HTTP 429 string.
+  static isRateLimitMsg(msg: string, err?: any): boolean {
+    return msg.includes('429')
+      || msg.toLowerCase().includes('too many request')
+      || (err as any)?.error?.code === 15
+      || (err as any)?.code === 15;
+  }
 
   private lastBlockAt   = Date.now();
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -67,7 +75,7 @@ export class ResilientWsProvider {
 
     ws?.on?.('error', (err: any) => {
       const msg   = String(err?.message ?? err);
-      const is429 = msg.includes('429');
+      const is429 = ResilientWsProvider.isRateLimitMsg(msg);
       logger.error('RWS', `Socket error: ${msg}`);
       this.scheduleReconnect(is429);
     });
@@ -133,10 +141,12 @@ export class ResilientWsProvider {
         await this.destroyCurrent();
         await this.connect();
       } catch (err: any) {
-        const msg = String(err?.message ?? err);
+        const msg  = String(err?.message ?? err);
+        const isRL = ResilientWsProvider.isRateLimitMsg(msg, err);
         logger.error('RWS', `Reconnect failed: ${msg}`);
+        if (isRL) rpcHealth.mark429();
         this.reconnecting = false;
-        this.scheduleReconnect(msg.includes('429'));
+        this.scheduleReconnect(isRL);
         return;
       }
       this.reconnecting = false;
