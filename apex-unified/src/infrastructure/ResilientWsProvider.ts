@@ -1,5 +1,6 @@
 import { WebSocketProvider } from 'ethers';
 import { logger } from '../core/logger';
+import { rpcHealth, setCachedBlock } from '../core/rpcHealth';
 
 type ListenerEntry  = { event: string; handler: (...args: any[]) => void };
 type ConnectHandler = (provider: WebSocketProvider) => void | Promise<void>;
@@ -49,7 +50,7 @@ export class ResilientWsProvider {
     this.startWatchdog();
   }
 
-  // ── Core connect / reconnect ──────────────────────────────────────────────
+  // ── Core connect / reconnect ──────────────────────────────────────────
 
   private async connect(): Promise<void> {
     this.provider = new WebSocketProvider(this.url, this.chainId);
@@ -62,8 +63,8 @@ export class ResilientWsProvider {
     });
 
     ws?.on?.('error', (err: any) => {
-      const msg      = String(err?.message ?? err);
-      const is429    = msg.includes('429');
+      const msg   = String(err?.message ?? err);
+      const is429 = msg.includes('429');
       logger.error('RWS', `Socket error: ${msg}`);
       this.scheduleReconnect(is429);
     });
@@ -76,6 +77,7 @@ export class ResilientWsProvider {
     this.lastBlockAt         = Date.now();
     this.attempt             = 0;
     this.consecutiveFailures = 0;
+    rpcHealth.markSuccess(); // successful connect = one positive health signal
     logger.info('RWS', `Connected — head block ${block}`);
 
     for (const h of this.connectHandlers) {
@@ -89,6 +91,8 @@ export class ResilientWsProvider {
     if (event === 'block') {
       return (...args: any[]) => {
         this.lastBlockAt = Date.now();
+        if (typeof args[0] === 'number') setCachedBlock(args[0]);
+        rpcHealth.markSuccess();
         handler(...args);
       };
     }
@@ -101,6 +105,8 @@ export class ResilientWsProvider {
 
     this.attempt++;
     this.consecutiveFailures++;
+
+    if (isRateLimit) rpcHealth.mark429();
 
     if (this.consecutiveFailures >= ResilientWsProvider.MAX_CONSECUTIVE_FAILURES) {
       logger.error('RWS', `${this.consecutiveFailures} consecutive failures — exiting for PM2 restart`);
@@ -146,7 +152,7 @@ export class ResilientWsProvider {
     await this.destroyCurrent();
   }
 
-  // ── Watchdog — catches silent zombie sockets ──────────────────────────────
+  // ── Watchdog — catches silent zombie sockets ──────────────────────────────────
 
   private startWatchdog(): void {
     if (this.watchdogTimer) clearInterval(this.watchdogTimer);

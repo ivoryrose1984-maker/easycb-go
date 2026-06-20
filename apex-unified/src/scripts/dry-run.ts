@@ -14,6 +14,7 @@ import { checkCircuitBreaker, setInitialBalance } from '../risk/circuitBreaker';
 import { acquireLock }             from '../risk/networkMutex';
 import { FastPathExecutor }        from '../execution/FastPathExecutor';
 import { getHttpProvider }         from '../infrastructure/fallbackProvider';
+import { runStartupValidation }    from '../core/startupValidator';
 import { ethers }                  from 'ethers';
 
 const APEX_ABI = [
@@ -83,7 +84,7 @@ function buildContext(p: ethers.WebSocketProvider): BotContext {
   };
 }
 
-// ── Module-level state ────────────────────────────────────────────────────────
+// ── Module-level state ──────────────────────────────────────────────────
 let ctx:           BotContext | null = null;
 let handlerActive  = false;
 let fastExec:      FastPathExecutor | null = null;
@@ -108,7 +109,7 @@ async function getEthPrice(): Promise<bigint> {
   } catch { return 3_000_000_000n; }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ── Main ─────────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
   console.log('╔═══════════════════════════════════════════════════════════════╗');
   console.log('║         A P E X   U N I F I E D   B O T                     ║');
@@ -125,6 +126,13 @@ async function main(): Promise<void> {
     CONFIG.ENABLE_AERODROME_SIGNAL   ? 'apex.aerodrome_spread'   : '',
   ].filter(Boolean).join(', ')}`);
   console.log('');
+
+  if (CONFIG.ALCHEMY_WSS_URL.includes('alchemy.com')) {
+    logger.warn('MAIN',
+      'Alchemy RPC detected — if you hit 429 throttle errors, switch to free drpc.org: ' +
+      'update ALCHEMY_WSS_URL=wss://base.drpc.org in .env (no account needed)'
+    );
+  }
 
   if (!acquireLock()) {
     logger.error('MAIN', 'Another instance is running on this chain — exiting');
@@ -160,7 +168,7 @@ async function main(): Promise<void> {
   let   initialBalSet   = false;
   let   firstConnect    = true;
 
-  // ── ResilientWsProvider ───────────────────────────────────────────────────
+  // ── ResilientWsProvider ──────────────────────────────────────────────
   const rws = new ResilientWsProvider(CONFIG.ALCHEMY_WSS_URL, CONFIG.CHAIN_ID);
 
   // Rebuild scan context on every (re)connect — scanners hold provider refs
@@ -168,6 +176,15 @@ async function main(): Promise<void> {
     ctx            = buildContext(provider);
     cachedEthPrice = 0n;
     lastEthPriceMs = 0;
+
+    // Run startup validation once on first connect (non-blocking — populates pool
+    // filter over ~30s; scans run permissively until validation completes)
+    if (firstConnect) {
+      const httpOrWs: ethers.Provider = getHttpProvider() ?? provider;
+      runStartupValidation(httpOrWs).catch((e: any) =>
+        logger.warn('MAIN', `Startup validation error: ${e.message}`)
+      );
+    }
 
     // Circuit breaker: set baseline balance only on first connect
     if (monitorAddress && !initialBalSet) {
@@ -227,7 +244,7 @@ async function main(): Promise<void> {
     }
   });
 
-  // ── Circuit breaker polling ───────────────────────────────────────────────
+  // ── Circuit breaker polling ─────────────────────────────────────────────
   if (monitorAddress) {
     setInterval(() => {
       // rws.provider may be null/stale during reconnect — skip silently
@@ -235,7 +252,7 @@ async function main(): Promise<void> {
     }, 30_000);
   }
 
-  // ── Hourly summary ────────────────────────────────────────────────────────
+  // ── Hourly summary ──────────────────────────────────────────────────────
   setInterval(() => {
     const up = uptime(START);
     const summary = {
@@ -268,7 +285,7 @@ async function main(): Promise<void> {
     );
   }, 60 * 60 * 1_000);
 
-  // ── Graceful shutdown ─────────────────────────────────────────────────────
+  // ── Graceful shutdown ──────────────────────────────────────────────────
   async function shutdown(signal: string) {
     logger.info('MAIN', `${signal} received — shutting down`);
     await rws.destroy();
@@ -277,7 +294,7 @@ async function main(): Promise<void> {
   process.on('SIGINT',  () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  // ── Connect ───────────────────────────────────────────────────────────────
+  // ── Connect ──────────────────────────────────────────────────────────────
   logger.info('MAIN', 'Connecting to Base via WebSocket...');
   await rws.start();
   logger.info('MAIN', 'Connected — scanning started');

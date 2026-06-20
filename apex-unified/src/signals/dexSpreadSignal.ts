@@ -5,6 +5,8 @@ import { opportunityHash } from '../core/dedup';
 import { logger } from '../core/logger';
 import { logRejection } from '../core/jsonlLogger';
 import { ternarySearchSize } from '../execution/flashLoanPlanner';
+import { rpcHealth } from '../core/rpcHealth';
+import { isPoolValid } from '../core/startupValidator';
 
 const QUOTER_ABI = [
   'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
@@ -48,7 +50,7 @@ export class DexSpreadSignal {
     this.cakeQuoter = new ethers.Contract(CONFIG.CONTRACTS.CAKE_QUOTER, QUOTER_ABI, provider);
   }
 
-  // ── Size search ─────────────────────────────────────────────────────────────
+  // ── Size search ───────────────────────────────────────────────────────────────────
 
   private async sizeSearch(
     pair:     { tokenIn: string; tokenOut: string },
@@ -84,7 +86,7 @@ export class DexSpreadSignal {
     return { optimalAmount, lo, hi };
   }
 
-  // ── Main scan ────────────────────────────────────────────────────────────────
+  // ── Main scan ─────────────────────────────────────────────────────────────────────
 
   async scan(
     pair:        { tokenIn: string; tokenOut: string; name: string },
@@ -92,16 +94,21 @@ export class DexSpreadSignal {
     blockNumber: number,
     ethPriceUsd: bigint
   ): Promise<DexSpreadResult | null> {
+    // Skip when RPC is throttled (429) — reduces CU burn during rate-limit window
+    if (rpcHealth.shouldSkipNonCritical()) return null;
+
     try {
-      // ── Phase 1: buy quotes tokenIn → tokenOut (both DEXes, all fee tiers) ──
+      // ── Phase 1: buy quotes tokenIn → tokenOut (both DEXes, confirmed fee tiers only) ──
       const [uniBuyRaw, cakeBuyRaw] = await Promise.all([
         Promise.all(UNI_FEES.map(fee =>
+          !isPoolValid('uni-v3', fee, pair.tokenIn, pair.tokenOut) ? Promise.resolve(0n) :
           this.uniQuoter.quoteExactInputSingle.staticCall({
             tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
             amountIn: loanAmount, fee, sqrtPriceLimitX96: 0,
           }).then((r: any) => r[0] as bigint).catch(() => 0n)
         )),
         Promise.all(CAKE_FEES.map(fee =>
+          !isPoolValid('cake-v3', fee, pair.tokenIn, pair.tokenOut) ? Promise.resolve(0n) :
           this.cakeQuoter.quoteExactInputSingle.staticCall({
             tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
             amountIn: loanAmount, fee, sqrtPriceLimitX96: 0,
@@ -121,6 +128,7 @@ export class DexSpreadSignal {
       const [uniSellRaw, cakeSellRaw] = await Promise.all([
         Promise.all(UNI_FEES.map(fee => {
           if (bestBuy.dex === 'uni-v3' && fee === bestBuy.fee) return Promise.resolve(0n);
+          if (!isPoolValid('uni-v3', fee, pair.tokenIn, pair.tokenOut)) return Promise.resolve(0n);
           return this.uniQuoter.quoteExactInputSingle.staticCall({
             tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
             amountIn: bestBuy.out, fee, sqrtPriceLimitX96: 0,
@@ -128,6 +136,7 @@ export class DexSpreadSignal {
         })),
         Promise.all(CAKE_FEES.map(fee => {
           if (bestBuy.dex === 'cake-v3' && fee === bestBuy.fee) return Promise.resolve(0n);
+          if (!isPoolValid('cake-v3', fee, pair.tokenIn, pair.tokenOut)) return Promise.resolve(0n);
           return this.cakeQuoter.quoteExactInputSingle.staticCall({
             tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
             amountIn: bestBuy.out, fee, sqrtPriceLimitX96: 0,

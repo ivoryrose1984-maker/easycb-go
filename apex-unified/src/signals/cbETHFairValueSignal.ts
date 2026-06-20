@@ -5,8 +5,9 @@ import { getCompetitionWindow, adjustedThreshold } from '../core/clock';
 import { Opportunity } from '../types/Opportunity';
 import { opportunityHash } from '../core/dedup';
 import { logger } from '../core/logger';
+import { isPoolValid } from '../core/startupValidator';
 
-// ── cbETH exchange-rate oracle ────────────────────────────────────────────────
+// ── cbETH exchange-rate oracle ────────────────────────────────────────────────────
 //
 // Source priority:
 //   1. cbETH contract exchangeRate() — only works on Ethereum L1; always fails on Base
@@ -154,6 +155,11 @@ export class CbEthFairValueSignal {
     const tryQuoter = async (quoter: ethers.Contract, label: string): Promise<string[]> => {
       const errs: string[] = [];
       for (const fee of FEE_TIERS) {
+        // Skip fee tiers where startup validation confirmed no pool exists
+        if (!isPoolValid(label, fee, CONFIG.TOKENS.cbETH, CONFIG.TOKENS.WETH)) {
+          errs.push(`${label}@${fee}:no_pool`);
+          continue;
+        }
         try {
           const [amountOut] = await quoter.quoteExactInputSingle.staticCall({
             tokenIn:           CONFIG.TOKENS.cbETH,
