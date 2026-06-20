@@ -19,8 +19,6 @@ const PAIRS = [
   { tokenIn: CONFIG.TOKENS.WETH,  tokenOut: CONFIG.TOKENS.cbETH, name: 'WETH/cbETH' },
   { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.cbBTC, name: 'USDC/cbBTC' },
   { tokenIn: CONFIG.TOKENS.WETH,  tokenOut: CONFIG.TOKENS.cbBTC, name: 'WETH/cbBTC' },
-  { tokenIn: CONFIG.TOKENS.USDbC, tokenOut: CONFIG.TOKENS.WETH,  name: 'USDbC/WETH' },
-  { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.USDbC, name: 'USDC/USDbC' },
   { tokenIn: CONFIG.TOKENS.WETH,  tokenOut: CONFIG.TOKENS.AERO,  name: 'WETH/AERO'  },
   { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.AERO,  name: 'USDC/AERO'  },
 ];
@@ -44,7 +42,7 @@ export class ApexPairScanner {
     // DAI uses 18 decimals (not 6 like USDC) — wrong probe caused phantom spread.
     const WETH_PROBE = ethers.parseEther('3');        // 3 ETH (18 dec)
     const DAI_PROBE  = ethers.parseUnits('5000', 18); // 5000 DAI (18 dec)
-    const USDC_PROBE = 5_000n * 1_000_000n;           // 5000 USDC/USDT/USDbC (6 dec)
+    const USDC_PROBE = 5_000n * 1_000_000n;           // 5000 USDC/USDT (6 dec)
 
     const results = await Promise.allSettled(
       PAIRS.map(pair => {

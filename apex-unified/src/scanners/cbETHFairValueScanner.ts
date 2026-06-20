@@ -6,6 +6,7 @@ import { captureDetected }      from '../core/captureTelemetry';
 import { isKilled }             from '../risk/strategyKillSwitch';
 import { logger }               from '../core/logger';
 import { isNewOpportunity }     from '../core/dedup';
+import { rpcHealth }            from '../core/rpcHealth';
 import { StrategyResult }       from '../types/StrategyResult';
 
 export class CbEthFairValueScanner {
@@ -32,12 +33,16 @@ export class CbEthFairValueScanner {
 
     logSignal(strategyId, {
       blockNumber,
-      grossEdgeBps:  result.grossEdgeBps,
-      netEdgeBps:    result.netEdgeBps,
-      cexEthMid:     result.cexEthMid,
-      window:        result.window.label,
-      multiplier:    result.window.multiplier,
-      hasOpportunity: !!result.opportunity,
+      latencyMs:      durationMs,
+      rpcState:       rpcHealth.getState(),
+      grossEdgeBps:   result.grossEdgeBps,
+      netEdgeBps:     result.netEdgeBps,
+      totalCostBps:   result.totalCostBps,
+      threshold:      result.threshold,
+      cexEthMid:      result.cexEthMid,
+      window:         result.window.label,
+      multiplier:     result.window.multiplier,
+      decision:       result.opportunity ? 'opportunity' : 'below_threshold',
     });
 
     if (!result.opportunity) {
@@ -45,9 +50,11 @@ export class CbEthFairValueScanner {
       logRejection({
         strategyId,
         blockNumber,
-        grossEdgeBps: result.grossEdgeBps,
-        netEdgeBps:   result.netEdgeBps,
-        reason:       skipReason,
+        grossEdgeBps:  result.grossEdgeBps,
+        netEdgeBps:    result.netEdgeBps,
+        totalCostBps:  result.totalCostBps,
+        threshold:     result.threshold,
+        reason:        skipReason,
       });
       captureDetected({
         opportunityId: `cbeth-${blockNumber}`,

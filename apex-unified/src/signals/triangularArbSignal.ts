@@ -17,7 +17,7 @@ interface PathCandidate {
 // Replaces dynamic cartesian product (~180 paths) to keep RPC load under control.
 // Each entry makes at most 3 sequential staticCalls; total ≤ 57 calls/block.
 function buildCandidates(): PathCandidate[] {
-  const { USDC, WETH, USDT, DAI, cbETH, cbBTC, AERO, USDbC } = CONFIG.TOKENS;
+  const { USDC, WETH, USDT, DAI, cbETH, cbBTC, AERO } = CONFIG.TOKENS;
   return [
     // ── cbETH ↔ WETH ────────────────────────────────────────────────────────
     { tokens: [USDC, WETH, cbETH], fees: [ 500,  500, 3000] },
@@ -43,9 +43,6 @@ function buildCandidates(): PathCandidate[] {
     { tokens: [USDC, AERO, WETH],  fees: [3000, 3000,  500] },
     { tokens: [USDC, WETH, AERO],  fees: [ 500,  500, 3000] },
     { tokens: [USDC, AERO, WETH],  fees: [3000,  500,  500] },
-    // ── USDbC stablecoin legs ────────────────────────────────────────────────
-    { tokens: [USDC, USDbC, WETH], fees: [ 100,  500,  500] },
-    { tokens: [USDC, WETH, USDbC], fees: [ 500,  500,  100] },
   ];
 }
 
