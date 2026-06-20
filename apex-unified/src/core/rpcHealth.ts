@@ -1,60 +1,78 @@
-import { ethers } from 'ethers';
 import { logger } from './logger';
 
-const WSS_BASE_DELAY_MS  = 1_000;
-const WSS_MAX_DELAY_MS   = 30_000;
-const WSS_MAX_ATTEMPTS   = 10;
-const WSS_KEEPALIVE_MS   = 20_000;
+export type RpcState = 'HEALTHY' | 'DEGRADED' | 'THROTTLED';
 
-export async function createWsProvider(
-  url: string,
-  onUnexpectedClose?: () => void,
-): Promise<ethers.WebSocketProvider> {
-  let attempt = 0;
-  let delay   = WSS_BASE_DELAY_MS;
+const THROTTLE_PAUSE_MS = 60_000;  // pause non-critical scans 60s on 429
+const AUTO_RESET_MS     = 90_000;  // auto-recover after 90s quiet period
 
-  while (attempt < WSS_MAX_ATTEMPTS) {
-    try {
-      const provider = new ethers.WebSocketProvider(url);
-      await provider.getBlockNumber();
+class RpcHealthMonitor {
+  private state:         RpcState = 'HEALTHY';
+  private throttledAt    = 0;
+  private consecutiveOk  = 0;
+  private resetTimer:    ReturnType<typeof setTimeout> | null = null;
 
-      const ws = (provider as any).websocket;
-      if (ws) {
-        if (ws.ping) {
-          // Keepalive must die with this socket — otherwise every reconnect
-          // leaks another interval pinging a dead connection.
-          const keepalive = setInterval(() => {
-            try { ws.ping?.(); } catch { /* ignore */ }
-          }, WSS_KEEPALIVE_MS);
-          ws.on('close', () => clearInterval(keepalive));
-        }
+  getState(): RpcState { return this.state; }
 
-        // Fire reconnect immediately on WS-level error or close rather than
-        // waiting up to 30s for the heartbeat to notice silence.
-        let fired = false;
-        const trigger = () => {
-          if (fired) return;
-          fired = true;
-          try { onUnexpectedClose?.(); } catch { /* ignore */ }
-        };
-        ws.on('error', (err: Error) => {
-          logger.warn('RPC', `WebSocket error (triggering reconnect): ${err.message}`);
-          trigger();
-        });
-        ws.on('close', () => trigger());
-      }
+  /** Returns true when RPC is rate-limited and non-critical calls should be deferred. */
+  shouldSkipNonCritical(): boolean {
+    if (this.state !== 'THROTTLED') return false;
+    return Date.now() - this.throttledAt < THROTTLE_PAUSE_MS;
+  }
 
-      logger.info('RPC', `Connected to ${url.slice(0, 50)}...`);
-      return provider;
-    } catch (err: any) {
-      attempt++;
-      logger.warn('RPC', `Connection attempt ${attempt} failed: ${err.message}`);
-      if (attempt >= WSS_MAX_ATTEMPTS) throw new Error(`RPC: max attempts reached for ${url}`);
-      await new Promise(r => setTimeout(r, delay));
-      delay = Math.min(delay * 2, WSS_MAX_DELAY_MS);
+  mark429(): void {
+    this.consecutiveOk = 0;
+    this.throttledAt   = Date.now();
+    this.transition('THROTTLED');
+    this.scheduleAutoReset();
+    logger.warn('RPC_HEALTH',
+      `429 rate-limit — non-critical scans paused for ${THROTTLE_PAUSE_MS / 1_000}s ` +
+      `(free alternative: set ALCHEMY_WSS_URL=wss://base.drpc.org in .env)`
+    );
+  }
+
+  markError(): void {
+    this.consecutiveOk = 0;
+    if (this.state === 'HEALTHY') this.transition('DEGRADED');
+  }
+
+  markSuccess(): void {
+    this.consecutiveOk++;
+    if (this.consecutiveOk >= 5 && this.state !== 'HEALTHY') {
+      this.consecutiveOk = 0;
+      this.transition('HEALTHY');
     }
   }
 
-  throw new Error('RPC: unreachable');
+  private transition(to: RpcState): void {
+    if (this.state !== to) {
+      logger.info('RPC_HEALTH', `State: ${this.state} → ${to}`);
+      this.state = to;
+    }
+  }
+
+  private scheduleAutoReset(): void {
+    if (this.resetTimer) clearTimeout(this.resetTimer);
+    this.resetTimer = setTimeout(() => {
+      this.resetTimer    = null;
+      this.consecutiveOk = 0;
+      this.transition('HEALTHY');
+      logger.info('RPC_HEALTH', 'Auto-reset to HEALTHY after quiet period');
+    }, AUTO_RESET_MS);
+    (this.resetTimer as any)?.unref?.();
+  }
 }
 
+export const rpcHealth = new RpcHealthMonitor();
+
+// ── Global block number cache ─────────────────────────────────────────────────
+// Set on every block event; lets any module read the current head without
+// issuing an extra eth_blockNumber call.
+let _cachedBlock   = 0;
+let _cachedBlockAt = 0;
+
+export function setCachedBlock(n: number): void {
+  _cachedBlock   = n;
+  _cachedBlockAt = Date.now();
+}
+
+export function getCachedBlock(): number { return _cachedBlock; }
