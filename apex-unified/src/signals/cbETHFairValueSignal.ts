@@ -17,7 +17,7 @@ import { isPoolValid } from '../core/startupValidator';
 //   5. Hardcoded constant — absolute last resort, logs ERROR, signal unreliable
 //
 // Base mainnet Chainlink feeds:
-//   cbETH/USD: 0xd7818272B9e248357d13057AAb0B417aF31E817d  (may be deprecated)
+//   cbETH/USD: 0xd7818272B9e248357d13057AAb0B417aF31E817d  (DEPRECATED — disabled at startup)
 //   ETH/USD:   0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70
 const CHAINLINK_CBETH_USD = '0xd7818272B9e248357d13057AAb0B417aF31E817d';
 const CHAINLINK_ETH_USD   = '0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70';
@@ -35,8 +35,30 @@ const STALE_RATE_SECS  = 90_000;
 // Only used if Chainlink + cache both fail — logs ERROR every block it's used
 const CBETH_FALLBACK_RATE = 1_065_000_000_000_000_000n; // 1.065e18
 
-const PROBE_WETH = ethers.parseEther('0.5');   // reduced from 3.33 — avoids thin-pool revert
-const FEE_TIERS  = [500, 100, 3000, 10000] as const;
+// Probe amount: 0.5 cbETH (18 dec). Named PROBE_CBETH to avoid confusion with WETH amounts.
+const PROBE_CBETH = ethers.parseEther('0.5');
+
+// Uni V3 fee tiers to try for cbETH/WETH
+const UNI_FEE_TIERS  = [500, 100, 3000, 10000] as const;
+// PancakeSwap V3 fee tiers: 2500 replaces 3000 vs Uni V3
+const CAKE_FEE_TIERS = [500, 100, 2500, 10000] as const;
+
+// ── Cost model constants ───────────────────────────────────────────────────────────
+//
+// GAS_ETH: realistic Base L2 flash-loan arb tx cost.
+//   250k gas × 0.05 gwei (conservative) = 0.0000125 ETH.
+//   Using 0.00005 ETH as ceiling to cover L1 data overhead.
+//   Previous value was 0.0003 ETH (∼6× too high) which suppressed real signals.
+//
+// BUY_SIDE_FEE_BPS: represents the fee paid on the buy leg when acquiring cbETH
+//   with WETH before selling on the mispriced pool. The sell-side fee is already
+//   embedded in the DEX quoter output (quoteExactInputSingle deducts the pool fee)
+//   so we do NOT add it again here.
+//
+const GAS_ETH           = 0.00005;  // ceiling estimate for Base L2
+const BUY_SIDE_FEE_BPS  = 5;        // buy-leg pool fee buffer (0.05% at fee=500 tier)
+const LATENCY_BPS       = 3;        // execution latency vs signal detection
+const FAILURE_BPS       = 3;        // retry / partial-fill buffer
 
 export interface CbEthSignalResult {
   opportunity:  Opportunity | null;
@@ -44,6 +66,8 @@ export interface CbEthSignalResult {
   netEdgeBps:   number;
   cexEthMid:    number | null;
   window:       ReturnType<typeof getCompetitionWindow>;
+  threshold:    number;
+  totalCostBps: number;
 }
 
 class CbEthRateOracle {
@@ -152,35 +176,43 @@ export class CbEthFairValueSignal {
     let feeTierUsed = 0;
     let dexSource = 'uni-v3';
 
-    const tryQuoter = async (quoter: ethers.Contract, label: string): Promise<string[]> => {
+    // Try a quoter across its fee tier list; skip confirmed-empty pools from startup validation.
+    // Returns early with empty errors[] on first successful quote.
+    const tryQuoter = async (
+      quoter: ethers.Contract,
+      dex: string,
+      feeTiers: readonly number[],
+    ): Promise<string[]> => {
       const errs: string[] = [];
-      for (const fee of FEE_TIERS) {
+      for (const fee of feeTiers) {
         // Skip fee tiers where startup validation confirmed no pool exists
-        if (!isPoolValid(label, fee, CONFIG.TOKENS.cbETH, CONFIG.TOKENS.WETH)) {
-          errs.push(`${label}@${fee}:no_pool`);
+        if (!isPoolValid(dex, fee, CONFIG.TOKENS.cbETH, CONFIG.TOKENS.WETH)) {
+          errs.push(`${dex}@${fee}:no_pool`);
           continue;
         }
         try {
           const [amountOut] = await quoter.quoteExactInputSingle.staticCall({
             tokenIn:           CONFIG.TOKENS.cbETH,
             tokenOut:          CONFIG.TOKENS.WETH,
-            amountIn:          PROBE_WETH,
+            amountIn:          PROBE_CBETH,
             fee,
             sqrtPriceLimitX96: 0n,
           });
           dexWethOut  = amountOut as bigint;
           feeTierUsed = fee;
-          dexSource   = label;
+          dexSource   = dex;
           return [];
         } catch (e: any) {
-          errs.push(`${label}@${fee}:${e?.code ?? e?.message?.slice(0, 40) ?? 'unknown'}`);
+          errs.push(`${dex}@${fee}:${e?.code ?? e?.message?.slice(0, 40) ?? 'unknown'}`);
         }
       }
       return errs;
     };
 
-    const uniErrs  = await tryQuoter(this.uniQuoter,  'uni-v3');
-    const cakeErrs = dexWethOut === null ? await tryQuoter(this.cakeQuoter, 'cake-v3') : [];
+    const uniErrs  = await tryQuoter(this.uniQuoter,  'uni-v3',  UNI_FEE_TIERS);
+    const cakeErrs = dexWethOut === null
+      ? await tryQuoter(this.cakeQuoter, 'cake-v3', CAKE_FEE_TIERS)
+      : [];
     const allErrors = [...uniErrs, ...cakeErrs];
 
     if (dexWethOut === null && allErrors.length > 0) {
@@ -193,7 +225,8 @@ export class CbEthFairValueSignal {
     }
     const resolvedOut = dexWethOut as bigint; // async closure mutation — TypeScript can't narrow, cast required
 
-    const dexWethPerCbEth = Number(resolvedOut) / Number(PROBE_WETH);
+    const probeSizeEth    = Number(ethers.formatEther(PROBE_CBETH)); // 0.5
+    const dexWethPerCbEth = Number(resolvedOut) / Number(PROBE_CBETH);
     const grossEdgeBps    = ((dexWethPerCbEth - fairWethPerCbEth) / fairWethPerCbEth) * 10_000;
 
     // Anomaly gate: cbETH/WETH should never deviate more than 200bps from fair value.
@@ -210,11 +243,14 @@ export class CbEthFairValueSignal {
     const window     = getCompetitionWindow();
     const threshold  = adjustedThreshold(CONFIG.MIN_NET_EDGE_BPS);
 
-    const gasEth       = 0.0003;
-    const probeSizeEth = Number(ethers.formatEther(PROBE_WETH));
-    const gasAsBps     = (gasEth / probeSizeEth) * 10_000;
-    const totalCosts   = gasAsBps + 5 + (feeTierUsed / 100) + CONFIG.LATENCY_BUFFER_BPS + CONFIG.FAILURE_BUFFER_BPS;
-    const netEdgeBps   = grossEdgeBps - totalCosts;
+    // ── Cost model ───────────────────────────────────────────────────────────────
+    // gasAsBps: gas cost expressed as % of probe size.
+    //   GAS_ETH is the ceiling tx cost on Base L2 (see constant definition above).
+    //   NOTE: sell-side pool fee is already embedded in the DEX quote output,
+    //   so we do NOT add feeTierUsed/100 here (that was a previous bug).
+    const gasAsBps    = (GAS_ETH / probeSizeEth) * 10_000; // ~1 bps at 0.5 ETH probe
+    const totalCostBps = gasAsBps + BUY_SIDE_FEE_BPS + LATENCY_BPS + FAILURE_BPS;
+    const netEdgeBps   = grossEdgeBps - totalCostBps;
 
     const hash = opportunityHash({
       chainId:      CONFIG.CHAIN_ID,
@@ -222,7 +258,7 @@ export class CbEthFairValueSignal {
       feeTier:      feeTierUsed,
       tokenIn:      CONFIG.TOKENS.cbETH,
       tokenOut:     CONFIG.TOKENS.WETH,
-      quotedInput:  PROBE_WETH.toString(),
+      quotedInput:  PROBE_CBETH.toString(),
       quotedOutput: resolvedOut.toString(),
     });
 
@@ -232,13 +268,14 @@ export class CbEthFairValueSignal {
     const ethPriceUsd    = cexEthMid ?? 3_000;
     const grossProfitEth = (grossEdgeBps / 10_000) * probeSizeEth;
     const grossProfitUsd = parseFloat((grossProfitEth * ethPriceUsd).toFixed(4));
-    const gasUsd         = 0.0003 * ethPriceUsd;
+    const gasUsd         = GAS_ETH * ethPriceUsd;
     const netProfitUsd   = parseFloat(Math.max(0, grossProfitUsd - gasUsd - grossProfitUsd * (CONFIG.FLASH_LOAN_FEE_BPS / 10_000)).toFixed(4));
 
     logger.debug('cbETH',
       `block=${blockNumber} rate=${fairWethPerCbEth.toFixed(6)} source=${rateSource} dex=${dexSource}@${feeTierUsed} ` +
       `gross=${grossEdgeBps.toFixed(2)}bps net=${netEdgeBps.toFixed(2)}bps ` +
-      `grossUsd=$${grossProfitUsd.toFixed(2)} thresh=${threshold.toFixed(2)}bps latency=${rpcLatencyMs}ms`
+      `costs=${totalCostBps.toFixed(1)}bps thresh=${threshold.toFixed(2)}bps[${window.label}] ` +
+      `grossUsd=$${grossProfitUsd.toFixed(2)} latency=${rpcLatencyMs}ms`
     );
 
     const opp: Opportunity = {
@@ -254,7 +291,7 @@ export class CbEthFairValueSignal {
       route:            `cbETH→WETH (${dexSource}@${feeTierUsed})`,
       dex:              dexSource,
       feeTier:          feeTierUsed,
-      quotedInput:      PROBE_WETH.toString(),
+      quotedInput:      PROBE_CBETH.toString(),
       quotedOutput:     resolvedOut.toString(),
       fairValuePrice:   fairWethPerCbEth,
       dexPrice:         dexWethPerCbEth,
@@ -262,12 +299,12 @@ export class CbEthFairValueSignal {
       spreadBps:        parseFloat(grossEdgeBps.toFixed(4)),
       grossProfitUsd,
       netProfitUsd,
-      gasEstimate:      gasEth.toFixed(6),
+      gasEstimate:      GAS_ETH.toFixed(6),
       slippageEstimate: 5,
       flashLoanFeeEst:  0,
       builderFeeEst:    0,
       confidenceScore:  Math.min(100, Math.max(0, Math.round(netEdgeBps * 5))),
-      rejectionReason:  isOpportunity ? null : `Net ${netEdgeBps.toFixed(2)}bps below ${threshold.toFixed(2)}bps threshold`,
+      rejectionReason:  isOpportunity ? null : `Net ${netEdgeBps.toFixed(2)}bps below ${threshold.toFixed(2)}bps threshold [${window.label}]`,
       safetyDecision:   'dry_run_only',
       dryRunOnly:       true,
       liveEligible:     false,
@@ -279,6 +316,8 @@ export class CbEthFairValueSignal {
       netEdgeBps:   parseFloat(netEdgeBps.toFixed(4)),
       cexEthMid,
       window,
+      threshold,
+      totalCostBps,
     };
   }
 }

@@ -54,7 +54,7 @@ export const CONFIG = {
   MAX_PER_TRADE_LOSS_USD: parseInt(optional('MAX_PER_TRADE_LOSS_USD', '100'),  10),
   MIN_NET_EDGE_BPS:      parseInt(optional('MIN_NET_EDGE_BPS',       '5'),     10),
   CEX_TRIGGER_BPS:       parseInt(optional('CEX_TRIGGER_BPS',        '15'),    10),
-  DRAWDOWN_THRESHOLD:    parseFloat(optional('DRAWDOWN_THRESHOLD',    '50')),  // % balance drawdown to trigger circuit breaker (last-resort safeguard)
+  DRAWDOWN_THRESHOLD:    parseFloat(optional('DRAWDOWN_THRESHOLD',    '50')),
 
   // Liquidity filter — reject thin pools before counting as opportunities
   LIQUIDITY_CHECK_SCALE:    parseInt(optional('LIQUIDITY_CHECK_SCALE',    '10'),   10),
@@ -85,7 +85,6 @@ export const CONFIG = {
   },
 
   // Base-compatible submission targets (ENABLE_BUILDER_SUBMISSION=false by default)
-  // Base uses a centralized Coinbase sequencer — direct RPC is correct for most cases
   BUILDERS: [
     { name: 'base-sequencer', url: 'https://mainnet.base.org',        enabled: true  },
     { name: 'mev-share',      url: 'https://mev-share.flashbots.net', enabled: false },
@@ -101,7 +100,11 @@ export const CONFIG = {
   MIN_LOAN_DAI:  1_000_000_000_000_000_000_000n,  // 1,000 DAI in wei (18 dec)
   MAX_LOAN_DAI: 50_000_000_000_000_000_000_000n,  // 50,000 DAI in wei (18 dec)
   MAX_TERNARY_ITERS: 8,
-  MIN_PROFIT_BPS:    20,
+
+  // MIN_PROFIT_BPS: minimum net spread for DEX spread strategy to count as an opportunity.
+  // Set to 8 bps for discovery (gas + 0.05% swap fee + small buffer).
+  // Previous value of 20 bps was too conservative and suppressed real signals.
+  MIN_PROFIT_BPS:    8,
   MAX_CONCURRENT_CYCLES: 5,
 
   // Gas
@@ -111,8 +114,11 @@ export const CONFIG = {
   BASE_FEE_MULTIPLIER:       2n,
   DYNAMIC_PRIORITY_MIN_PCT:  10,
   DYNAMIC_PRIORITY_MAX_PCT:  25,
-  LATENCY_BUFFER_BPS:        5,
-  FAILURE_BUFFER_BPS:        5,
+  // LATENCY_BUFFER_BPS: latency cost between signal detection and execution (in bps).
+  // FAILURE_BUFFER_BPS: cost of partial fills and retry overhead (in bps).
+  // Both reduced from 5 to 3: 5 bps was overly conservative for Base L2 (~2s blocks).
+  LATENCY_BUFFER_BPS:        3,
+  FAILURE_BUFFER_BPS:        3,
   FLASH_LOAN_FEE_BPS:        0,
 
   // Cache TTLs

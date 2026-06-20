@@ -13,11 +13,7 @@ const QUOTER_ABI = [
 ];
 
 const UNI_FEES  = [100, 500, 3000, 10000];
-const CAKE_FEES = [100, 500, 2500, 10000];  // PancakeSwap V3 uses 2500 not 3000
-
-// Liquidity depth constants come from CONFIG so they are tunable via .env
-// LIQUIDITY_CHECK_SCALE:    re-quote at N× loan size (default 10)
-// LIQUIDITY_MAX_IMPACT_BPS: reject if price degrades > this many bps at N× (default 5000 = 50%)
+const CAKE_FEES = [100, 500, 2500, 10000];  // PancakeSwap V3: 2500 replaces 3000
 
 type DexId = 'uni-v3' | 'cake-v3';
 
@@ -36,7 +32,6 @@ export interface DexSpreadResult {
   grossProfit:     bigint;
   rejectionReason: string | null;
   opportunity:     Opportunity | null;
-  // Size-search bounds (populated when size search runs)
   chosenSizeLo?:   string;
   chosenSizeHi?:   string;
 }
@@ -49,8 +44,6 @@ export class DexSpreadSignal {
     this.uniQuoter  = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER,  QUOTER_ABI, provider);
     this.cakeQuoter = new ethers.Contract(CONFIG.CONTRACTS.CAKE_QUOTER, QUOTER_ABI, provider);
   }
-
-  // ── Size search ───────────────────────────────────────────────────────────────────
 
   private async sizeSearch(
     pair:     { tokenIn: string; tokenOut: string },
@@ -86,8 +79,6 @@ export class DexSpreadSignal {
     return { optimalAmount, lo, hi };
   }
 
-  // ── Main scan ─────────────────────────────────────────────────────────────────────
-
   async scan(
     pair:        { tokenIn: string; tokenOut: string; name: string },
     loanAmount:  bigint,
@@ -98,7 +89,7 @@ export class DexSpreadSignal {
     if (rpcHealth.shouldSkipNonCritical()) return null;
 
     try {
-      // ── Phase 1: buy quotes tokenIn → tokenOut (both DEXes, confirmed fee tiers only) ──
+      // ── Phase 1: buy quotes tokenIn → tokenOut (confirmed fee tiers only) ──
       const [uniBuyRaw, cakeBuyRaw] = await Promise.all([
         Promise.all(UNI_FEES.map(fee =>
           !isPoolValid('uni-v3', fee, pair.tokenIn, pair.tokenOut) ? Promise.resolve(0n) :
@@ -144,10 +135,7 @@ export class DexSpreadSignal {
         })),
       ]);
 
-      // Floor: reject sell quotes returning < 50% of loanAmount.
-      // Prevents dust-winning races where the deep pool times out and a thin
-      // pool returns near-zero, producing fake -9000bps spreads that pollute
-      // the anomaly log and bias the capture-rate metric.
+      // Sell floor: reject quotes returning < 50% of loan (dust-win race prevention)
       const sellFloor = loanAmount / 2n;
       const sellQuotes: QuoteCandidate[] = [
         ...UNI_FEES.map((fee, i)  => ({ dex: 'uni-v3'  as DexId, fee, out: uniSellRaw[i] })),
@@ -157,23 +145,12 @@ export class DexSpreadSignal {
       if (sellQuotes.length === 0) return null;
       const bestSell = sellQuotes.reduce((a, b) => b.out > a.out ? b : a);
 
-      // Phase 3: reject cross-fee-tier same-DEX if buy and sell are on the same DEX
-      // (different fee tiers of the same DEX produce persistent phantom spreads due to
-      // thin or absent pools at exotic fee tiers — confirmed by frozen 95bps DAI/WETH).
-      const isCrossDex = bestBuy.dex !== bestSell.dex;
-      if (!isCrossDex) {
-        // Same DEX: only allow if cross-fee-tier spread is plausible — apply strict
-        // liquidity check on BOTH legs before counting as opportunity.
-        // (Cross-DEX arb is allowed; same-DEX same-tier was already blocked in Phase 2.)
-      }
-
+      const isCrossDex    = bestBuy.dex !== bestSell.dex;
       const spreadBpsProbe = loanAmount > 0n
         ? Number(((bestSell.out - loanAmount) * 10_000n) / loanAmount)
         : 0;
 
-      // BUG-01: anomaly gate — |spread| > 2000bps indicates empty/thin pool or decimal
-      // mismatch, not a real market opportunity. Tag as "anomaly" (not "skip") so skip
-      // stats remain clean. Skip expensive liquidity check and size search.
+      // Anomaly gate: |spread| > 2000bps = empty/thin pool artifact
       if (Math.abs(spreadBpsProbe) > 2000) {
         logger.warn('DEX', `${pair.name} unit anomaly: spread=${spreadBpsProbe}bps — thin pool or no liquidity`);
         logRejection({ strategyId: 'apex.dex_spread', blockNumber, pair: pair.name, spreadBps: spreadBpsProbe, reason: 'unit_anomaly' });
@@ -193,16 +170,10 @@ export class DexSpreadSignal {
         };
       }
 
-      const dexLabel = isCrossDex
-        ? `${bestBuy.dex}→${bestSell.dex}`
-        : bestBuy.dex;
-
+      const dexLabel      = isCrossDex ? `${bestBuy.dex}→${bestSell.dex}` : bestBuy.dex;
       const isOpportunity = spreadBpsProbe >= CONFIG.MIN_PROFIT_BPS;
 
-      // Phase 4: liquidity depth check — run on BOTH buy AND sell legs in parallel.
-      // Checks at LIQUIDITY_CHECK_SCALE× to catch thin pools.
-      // Sell leg check fixes the DAI/WETH cake-v3@500→cake-v3@100 phantom where the
-      // buy-only check passed but the sell pool (100bps) had no real liquidity.
+      // Phase 4: liquidity depth check on both legs at LIQUIDITY_CHECK_SCALE×
       let thinPool  = false;
       let impactBps = 0;
       const scale   = BigInt(CONFIG.LIQUIDITY_CHECK_SCALE);
@@ -222,28 +193,22 @@ export class DexSpreadSignal {
           }).then((r: any) => r[0] as bigint).catch(() => 0n),
         ]);
 
-        const buyImpact  = scaledBuyOut > 0n
-          ? Number((bestBuy.out * scale - scaledBuyOut)  * 10_000n / (bestBuy.out  * scale))
-          : 10_000;
-        const sellImpact = scaledSellOut > 0n
-          ? Number((bestSell.out * scale - scaledSellOut) * 10_000n / (bestSell.out * scale))
-          : 10_000;
+        const buyImpact  = scaledBuyOut  > 0n ? Number((bestBuy.out  * scale - scaledBuyOut)  * 10_000n / (bestBuy.out  * scale)) : 10_000;
+        const sellImpact = scaledSellOut > 0n ? Number((bestSell.out * scale - scaledSellOut) * 10_000n / (bestSell.out * scale)) : 10_000;
 
         impactBps = Math.max(buyImpact, sellImpact);
         thinPool  = impactBps > CONFIG.LIQUIDITY_MAX_IMPACT_BPS;
 
         if (thinPool) {
           logger.debug('DEX',
-            `${pair.name} thin-pool: buy=${buyImpact}bps sell=${sellImpact}bps ` +
-            `(${CONFIG.LIQUIDITY_CHECK_SCALE}× check) — skip`
+            `${pair.name} thin-pool: buy=${buyImpact}bps sell=${sellImpact}bps (${CONFIG.LIQUIDITY_CHECK_SCALE}×) — skip`
           );
         }
       }
 
-      // Phase 5: size search — find optimal loan amount via 8-iteration ternary search.
-      // Only runs when both legs pass the liquidity gate (rare — ~1% of pairs/block).
-      let finalLoan   = loanAmount;
-      let finalBuyOut = bestBuy.out;
+      // Phase 5: ternary size search (rare — only when liquidity gate passes)
+      let finalLoan    = loanAmount;
+      let finalBuyOut  = bestBuy.out;
       let finalSellOut = bestSell.out;
       let sizeLo: string | undefined;
       let sizeHi: string | undefined;
@@ -253,7 +218,6 @@ export class DexSpreadSignal {
         const isDaiIn  = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.DAI.toLowerCase();
         const { optimalAmount, lo, hi } = await this.sizeSearch(pair, bestBuy, bestSell, isWethIn, isDaiIn);
 
-        // Re-quote at optimal size to get accurate final output
         const buyQ  = bestBuy.dex  === 'uni-v3' ? this.uniQuoter  : this.cakeQuoter;
         const sellQ = bestSell.dex === 'uni-v3' ? this.uniQuoter  : this.cakeQuoter;
         const optBuyOut = await buyQ.quoteExactInputSingle.staticCall({
@@ -277,7 +241,6 @@ export class DexSpreadSignal {
         sizeHi = hi.toString();
       }
 
-      // Recompute spread at final (possibly optimal) size
       const spreadBps = finalLoan > 0n
         ? Number(((finalSellOut - finalLoan) * 10_000n) / finalLoan)
         : spreadBpsProbe;
@@ -290,13 +253,12 @@ export class DexSpreadSignal {
       const isWethIn       = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.WETH.toLowerCase();
       const isDaiIn        = pair.tokenIn.toLowerCase() === CONFIG.TOKENS.DAI.toLowerCase();
       const grossProfitRaw = finalSellOut > finalLoan ? finalSellOut - finalLoan : 0n;
-      // DAI is 18-dec ~$1; divide by 1e18. WETH is 18-dec; use eth price. Others are 6-dec USDC.
       const grossUsd       = isWethIn
         ? Math.max(0, usdcToUsd(grossProfitRaw * ethPriceUsd / 10n ** 18n))
         : isDaiIn
           ? Math.max(0, Number(grossProfitRaw) / 1e18)
           : Math.max(0, usdcToUsd(grossProfitRaw));
-      const gasUsd         = 0.0003 * (Number(ethPriceUsd) / 1e6);
+      const gasUsd         = 0.00005 * (Number(ethPriceUsd) / 1e6);
 
       const hash = opportunityHash({
         chainId:      CONFIG.CHAIN_ID,
@@ -331,7 +293,7 @@ export class DexSpreadSignal {
         spreadBps,
         grossProfitUsd:   grossUsd,
         netProfitUsd:     parseFloat(Math.max(0, grossUsd - gasUsd - grossUsd * (CONFIG.FLASH_LOAN_FEE_BPS / 10_000)).toFixed(4)),
-        gasEstimate:      '0.0003',
+        gasEstimate:      '0.00005',
         slippageEstimate: Math.min(250, Math.round(Math.sqrt(Number(finalLoan) / 1e12) * 10)),
         flashLoanFeeEst:  0,
         builderFeeEst:    0,
