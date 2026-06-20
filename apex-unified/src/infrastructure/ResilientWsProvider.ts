@@ -58,8 +58,11 @@ export class ResilientWsProvider {
     const ws: any = (this.provider as any).websocket;
 
     ws?.on?.('close', (code: number) => {
-      logger.warn('RWS', `Socket closed (code=${code})`);
-      this.scheduleReconnect(false);
+      // If the unhandledRejection handler already detected a rate-limit on this
+      // connection (e.g. eth_subscribe rejected with code 15), honour the floor.
+      const isRateLimit = rpcHealth.getState() === 'THROTTLED';
+      logger.warn('RWS', `Socket closed (code=${code})${isRateLimit ? ' — rate-limited' : ''}`);
+      this.scheduleReconnect(isRateLimit);
     });
 
     ws?.on?.('error', (err: any) => {

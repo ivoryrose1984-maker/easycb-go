@@ -4,6 +4,7 @@ import { getRunContext, uptime }   from '../core/runContext';
 import { logger }                  from '../core/logger';
 import { logSummary, logError }    from '../core/jsonlLogger';
 import { initTelegram, sendAlert, alertError } from '../infrastructure/telegramAlert';
+import { rpcHealth }                           from '../core/rpcHealth';
 import { ResilientWsProvider }     from '../infrastructure/ResilientWsProvider';
 import { getCexFeed }              from '../signals/cexContextSignal';
 import { CbEthFairValueScanner }   from '../scanners/cbETHFairValueScanner';
@@ -29,10 +30,22 @@ if (parseInt(process.env.CHAIN_ID ?? '8453', 10) !== 8453) {
 }
 
 // Provider errors, CEX feed reconnects, and gas forecaster failures surface here.
-// Log and continue — only exit for truly unknown exceptions that could leave the
-// bot in a corrupt state. ResilientWsProvider handles provider-level failures.
+// Rate-limit errors (code 15 / "Too many request") on eth_subscribe surface here as
+// unhandled rejections from ethers internals — mark the RPC health so the socket
+// close handler uses the rate-limit backoff floor instead of reconnecting immediately.
 process.on('unhandledRejection', (reason) => {
-  const msg = reason instanceof Error ? reason.stack ?? reason.message : String(reason);
+  const errCode = (reason as any)?.error?.code;
+  const msg     = reason instanceof Error ? reason.stack ?? reason.message : String(reason);
+  const isRateLimit = errCode === 15
+    || msg.toLowerCase().includes('too many request')
+    || msg.toLowerCase().includes('rate limit');
+
+  if (isRateLimit) {
+    rpcHealth.mark429();
+    logger.warn('RPC', 'Rate-limit on eth_subscribe (code 15) — RWS will back off and reconnect');
+    return; // Not a crash — ResilientWsProvider handles the socket close + retry
+  }
+
   logger.error('FATAL', `unhandledRejection: ${msg}`);
   logError({ timestamp: new Date().toISOString(), block: 0, error: `unhandledRejection: ${msg}` });
   // Do NOT exit — let the ResilientWsProvider's reconnect loop handle provider failures.
