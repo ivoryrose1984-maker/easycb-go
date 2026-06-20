@@ -5,6 +5,7 @@ import { logSignal, logRejection } from '../core/jsonlLogger';
 import { captureDetected }      from '../core/captureTelemetry';
 import { isKilled }             from '../risk/strategyKillSwitch';
 import { isNewOpportunity }     from '../core/dedup';
+import { rpcHealth }            from '../core/rpcHealth';
 import CONFIG                   from '../core/config';
 import { StrategyResult }       from '../types/StrategyResult';
 
@@ -25,6 +26,10 @@ export class ApexTriangularScanner {
 
     const results = await this.signal.scan(5_000n * 1_000_000n, blockNumber, ethPriceUsd);
 
+    // spreadBps from the signal is already net-of-fee; MIN_PROFIT_BPS is the gate.
+    const scanLatencyMs = Date.now() - t0;
+    const rpcState      = rpcHealth.getState();
+
     // Log every path individually — sub-threshold included — so bps distribution
     // is captured for MIN_NET_EDGE_BPS tuning during the dry run.
     for (const r of results) {
@@ -32,11 +37,14 @@ export class ApexTriangularScanner {
       const route  = `${r.tokens[0].slice(0,8)}→${r.tokens[1].slice(0,8)}→${r.tokens[2].slice(0,8)}`;
       logSignal(strategyId, {
         blockNumber,
+        latencyMs:  scanLatencyMs,
+        rpcState,
         route,
         fees:      r.fees,
         spreadBps: r.spreadBps,
+        threshold: CONFIG.MIN_PROFIT_BPS,
         grossProfitUsd: r.opportunity?.grossProfitUsd ?? 0,
-        hasOpp,
+        decision:  hasOpp ? 'opportunity' : 'below_threshold',
       });
       if (!hasOpp) {
         const skipReason = `spread=${r.spreadBps}bps below threshold`;

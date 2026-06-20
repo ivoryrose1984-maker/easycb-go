@@ -5,6 +5,7 @@ import { logSignal, logRejection } from '../core/jsonlLogger';
 import { captureDetected } from '../core/captureTelemetry';
 import { isKilled }        from '../risk/strategyKillSwitch';
 import { isNewOpportunity } from '../core/dedup';
+import { rpcHealth }        from '../core/rpcHealth';
 import { logger }          from '../core/logger';
 import CONFIG              from '../core/config';
 import { StrategyResult }  from '../types/StrategyResult';
@@ -56,6 +57,10 @@ export class ApexPairScanner {
     const opportunities = [];
     let errors = 0;
 
+    // spreadBps from the signal is already net-of-fee; MIN_PROFIT_BPS is the gate.
+    const scanLatencyMs = Date.now() - t0;
+    const rpcState      = rpcHealth.getState();
+
     for (const r of results) {
       if (r.status === 'rejected') { errors++; continue; }
       const res = r.value;
@@ -63,13 +68,16 @@ export class ApexPairScanner {
 
       logSignal(strategyId, {
         blockNumber,
+        latencyMs:  scanLatencyMs,
+        rpcState,
         pair:      res.pair,
         spreadBps: res.spreadBps,
+        threshold: CONFIG.MIN_PROFIT_BPS,
         buyDex:    res.buyDex,
         buyFee:    res.buyFee,
         sellDex:   res.sellDex,
         sellFee:   res.sellFee,
-        hasOpp:    !!res.opportunity,
+        decision:  res.opportunity ? 'opportunity' : 'below_threshold',
       });
 
       if (!res.opportunity) {
