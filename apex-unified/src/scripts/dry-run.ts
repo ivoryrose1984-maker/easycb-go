@@ -162,12 +162,13 @@ async function main(): Promise<void> {
     logger.warn('MAIN', 'BASE_HTTPS_URL not set — FastPathExecutor disabled (add to .env)');
   }
 
-  if (CONFIG.ENABLE_CEX_CONTEXT && CONFIG.ENABLE_BINANCE) {
-    logger.info('MAIN', 'Starting Binance CEX feed...');
+  if (CONFIG.ENABLE_CEX_CONTEXT && (CONFIG.ENABLE_BINANCE || CONFIG.ENABLE_KRAKEN)) {
+    const active = [CONFIG.ENABLE_BINANCE && 'Binance', CONFIG.ENABLE_KRAKEN && 'Kraken'].filter(Boolean).join(', ');
+    logger.info('MAIN', `Starting CEX feeds: ${active}...`);
     getCexFeed();
     await new Promise(r => setTimeout(r, 2_000));
-  } else if (CONFIG.ENABLE_CEX_CONTEXT && !CONFIG.ENABLE_BINANCE) {
-    logger.warn('MAIN', 'ENABLE_BINANCE=false — CEX feed disabled (Hetzner geo-blocked; set true if your IP allows Binance)');
+  } else if (CONFIG.ENABLE_CEX_CONTEXT) {
+    logger.warn('MAIN', 'All CEX feeds disabled — using CoinGecko REST fallback only');
   }
 
   const monitorAddress  = process.env.WALLET_ADDRESS ?? process.env.MONITOR_ADDRESS ?? '';

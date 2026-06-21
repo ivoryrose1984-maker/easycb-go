@@ -250,10 +250,9 @@ export class CbEthFairValueSignal {
       return null;
     }
 
-    const cex           = getCexFeed();
-    const binanceEthMid = cex.getMid('ethusdc');
-    // CoinGecko fallback when Binance is geo-blocked or disabled (30s cache, no auth)
-    const cexEthMid = binanceEthMid ?? (await getCoinGeckoPrice())?.ethUsd ?? null;
+    const cex       = getCexFeed();
+    // Kraken primary on Hetzner; Binance if accessible; CoinGecko if both unavailable
+    const cexEthMid = cex.getMid('ethusdc') ?? (await getCoinGeckoPrice())?.ethUsd ?? null;
     const window     = getCompetitionWindow();
     const threshold  = adjustedThreshold(CONFIG.MIN_NET_EDGE_BPS);
 

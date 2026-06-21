@@ -45,6 +45,9 @@ export const CONFIG = {
   // Binance feed — default false: Hetzner/VPS IPs are geo-blocked (HTTP 451).
   // Set true only when running from a region with Binance access.
   ENABLE_BINANCE:              flag('ENABLE_BINANCE',               false),
+  // Kraken feed — default true: public WebSocket, no auth, no geo-block on Hetzner.
+  // Primary real-time CEX feed on VPS; Binance is secondary when accessible.
+  ENABLE_KRAKEN:               flag('ENABLE_KRAKEN',                true),
   ENABLE_FLASH_LOAN_PLANNER:   flag('ENABLE_FLASH_LOAN_PLANNER',   true),
   ENABLE_BUILDER_SUBMISSION:   flag('ENABLE_BUILDER_SUBMISSION',   false),
 
