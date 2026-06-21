@@ -17,7 +17,6 @@ import { FastPathExecutor }        from '../execution/FastPathExecutor';
 import { setupExecutor, updateExecutorEthPrice } from '../execution/dryRunExecutor';
 import { getHttpProvider }         from '../infrastructure/fallbackProvider';
 import { runStartupValidation }    from '../core/startupValidator';
-import { setCachedBlock }          from '../core/rpcHealth';
 import { ethers }                  from 'ethers';
 
 const APEX_ABI = [
@@ -201,8 +200,7 @@ async function main(): Promise<void> {
     }
     handlerActive = true;
     stats.blocks++;
-    fastExec?.onBlock(blockNum);
-    setCachedBlock(blockNum);
+    fastExec?.onBlock(blockNum);   // ResilientWsProvider already called setCachedBlock
 
     try {
       const ethPrice = await getEthPrice(ctx.quoter);

@@ -104,8 +104,11 @@ ALLOW_LIVE=false     # default — must be explicitly set true to change
 
 ```bash
 npm run dry-run       # build + start scanning (DRY_RUN=true enforced)
+npm run live          # build + start LIVE execution (requires WALLET_PRIVATE_KEY + deployed contract)
 npm run report        # generate 72-hour report from JSONL logs
 npm run replay 2024-01-15   # replay a specific date
+npm run compile       # compile ApexFlashLoan.sol → compiled/ApexFlashLoan.bin
+npm run deploy        # build + compile + deploy contract to Base mainnet
 ```
 
 ---
@@ -114,12 +117,19 @@ npm run replay 2024-01-15   # replay a specific date
 
 | Phase | Status |
 |---|---|
-| Phase 1: Architecture + code | DONE — TypeScript clean, 42 tests passing, three audit rounds resolved |
+| Phase 1: Architecture + code | DONE — TypeScript clean, 120 tests passing, four audit rounds resolved |
 | Phase 2: Deploy to VPS | DONE — bot live on Hetzner via PM2, Alchemy paid plan, Chainlink cbETH rate confirmed (`source=chainlink`) |
-| Phase 3: 72-hour dry run | IN PROGRESS — ResilientWsProvider deployed 2026-06-11; zombie-socket crash loop eliminated; clean data accumulating |
-| Phase 4: Report + live readiness | NOT STARTED — needs 48h+ clean data through US/EU market-open windows |
+| Phase 3: 72-hour dry run | PAUSED — bot crashed due to drpc.org rate-limit loop (2026-06-21); rate-limit fix deployed (commits f80fe8f, 111f118); VPS needs `git pull` + restart with Alchemy WSS key |
+| Phase 4: Report + live readiness | CODE COMPLETE — all bugs fixed, live.ts entry point ready; awaiting Phase 3 clean data |
+| Phase 5: First live trade | CODE COMPLETE — live execution path wired; requires: Phase 3 ≥48h clean + readiness score ≥70 + rotate credentials + deploy contract + fund wallet |
 
-Live execution requires: Phase 3 complete + readiness score ≥70 + rotate all credentials + deploy ApexFlashLoan.sol + fresh funded wallet (~0.05 ETH on Base).
+Live execution checklist:
+1. Phase 3 complete (48h+ clean data, readiness score ≥70)
+2. `npm run deploy` — deploys ApexFlashLoan.sol, writes `APEX_FLASH_LOAN_BASE` to .env
+3. Rotate ALL credentials (Alchemy key, Telegram bot token)
+4. Fund fresh wallet with ~0.05 ETH on Base
+5. Set `DRY_RUN=false`, `ALLOW_LIVE=true`, `WALLET_PRIVATE_KEY=<new key>` in .env
+6. `pm2 start "npm run live" --name apex-live`
 
 ### Resolved audit issues (Phase 1)
 All of the following were identified and fixed before dry run:
@@ -149,8 +159,20 @@ All of the following were identified and fixed before dry run:
 22. Dedup hash no longer includes `blockNumber` — same route+quotes in consecutive blocks = persistent spread (thin liquidity), now suppressed for 3 blocks (ROUTE_TTL_BLOCKS=3) instead of counted as N independent opportunities. Fixes inflated signal counts (DAI/WETH 178bps was counting once per block).
 23. `PRIVATE_KEY` → `WALLET_PRIVATE_KEY` in `reportGenerator.ts` readiness scorer — was always blocking the readiness score even when the key was set.
 
+### Resolved audit issues (Phase 4/5, June 2026)
+24. `safety.ts` + `deploy-contract.ts`: `PRIVATE_KEY` → `WALLET_PRIVATE_KEY` — live gate always blocked; deploy always failed
+25. `liveExecutor.ts` WETH profit parsed as USDC (`/1e6`) — was showing profit 10^12× too large; now checks token address and uses `/1e18 × ethPriceUsd6` for WETH
+26. `liveExecutor.ts` priority bid `Math.round(usd)` — lost sub-dollar precision; now micro-dollar resolution
+27. `flashLoanPlanner.breakEvenEdgeBps` omitted priority fee from gas cost — threshold understated ~1.5 bps; now includes `predictedPriority`
+28. `calculateNetProfit` had dead `buyQuote` parameter — removed; call sites updated
+29. `dry-run.ts` backwards warning said "switch to drpc.org" — removed (drpc.org caused crash loop)
+30. `ExecutionPlan` type: added `ethPriceUsd6` field so WETH profit conversion has the ETH price used at plan-build time
+31. Live execution path entirely missing — all scanners called `executeDryRun()` unconditionally; no code called `executeLive()`. Fixed: `dryRunExecutor` now has async live gate + `setupExecutor()` wiring; `live.ts` created as Phase 5 entry point; `Opportunity` type carries `feeBuy`/`feeSell`/`liveRouterAddress` for same-DEX arbs; cross-DEX arbs remain dry-run-only (single-router contract can't execute Uni buy + Cake sell atomically)
+32. Aerodrome signal only compared against Uni V3 — now also queries PancakeSwap V3 (fee 2500); pairs expanded from 4→8 (added WETH/AERO, USDC/cbBTC, WETH/cbBTC, USDC/USDT); same-protocol round-trips rejected by protocol prefix
+33. `ApexFlashLoan.sol` bytecode: `npm run compile` now produces `compiled/ApexFlashLoan.bin` with correct name (solc prefixed filenames with path); `compiled/` gitignored
+
 ### Known data caveats
-- `apex.aerodrome_spread`: 0 profitable out of 10,775 scans (Jun 8–9) — disabled on VPS (`ENABLE_AERODROME_SIGNAL=false`) pending investigation
+- `apex.aerodrome_spread`: 0 profitable out of 10,775 scans (Jun 8–9) — now re-enabled with PancakeSwap V3 comparison + 8 pairs; VPS must set `ENABLE_AERODROME_SIGNAL=true`
 - Persistent DAI/WETH 178bps spread repeating across consecutive blocks is suspect: real arbs vanish in 1–2 blocks; a spread that persists usually means thin liquidity the quote can't actually fill at size. Treat repeated same-route signals as ONE opportunity, not thousands, when estimating revenue
 - VPS `.env` had `APEX_FLASH_LOAN_ADDRESS` (wrong name; code reads `APEX_FLASH_LOAN_BASE`)
 
