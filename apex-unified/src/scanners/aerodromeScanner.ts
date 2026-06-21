@@ -132,7 +132,7 @@ export class AerodromeScanner {
         filterResult:  'pass',
         skipReason:    null,
       });
-      executeDryRun(res.opportunity);
+      void executeDryRun(res.opportunity);
       opportunities.push(res.opportunity);
     }
 

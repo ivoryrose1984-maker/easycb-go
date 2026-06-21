@@ -230,11 +230,16 @@ class CombinedCexFeed implements CexFeed {
   }
 
   getAll(): Map<string, CexPrice> {
+    // Reverse so first feed overwrites last — first feed's prices win on key collision.
+    // Also apply same staleness gate as getMid() so callers don't see stale prices.
     const combined = new Map<string, CexPrice>();
+    const now = Date.now();
     for (const feed of [...this.feeds].reverse()) {
-      for (const [k, v] of feed.getAll()) combined.set(k, v);
+      for (const [k, v] of feed.getAll()) {
+        if (now - v.updatedAtMs <= STALE_MS) combined.set(k, v);
+      }
     }
-    return combined; // first feed's prices win on key collision
+    return combined;
   }
 
   destroy(): void { this.feeds.forEach(f => f.destroy()); }

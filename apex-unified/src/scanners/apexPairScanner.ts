@@ -127,7 +127,7 @@ export class ApexPairScanner {
         chosenSizeLo:  res.chosenSizeLo,
         chosenSizeHi:  res.chosenSizeHi,
       });
-      executeDryRun(res.opportunity);
+      void executeDryRun(res.opportunity);
       opportunities.push(res.opportunity);
     }
 

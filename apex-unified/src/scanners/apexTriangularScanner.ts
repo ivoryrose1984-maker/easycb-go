@@ -94,7 +94,7 @@ export class ApexTriangularScanner {
         filterResult:  'pass',
         skipReason:    null,
       });
-      executeDryRun(r.opportunity);
+      void executeDryRun(r.opportunity);
       accepted.push(r.opportunity);
     }
 

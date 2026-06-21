@@ -126,7 +126,7 @@ export function calculateNetProfit(
 ): ProfitResult {
   const grossProfit = sellQuote - amountIn;
   const gasCostWei  = CONFIG.GAS_ESTIMATE *
-    (gasForecast.predictedBaseFee + CONFIG.MIN_PRIORITY_FEE_GWEI * 1_000_000_000n);
+    (gasForecast.predictedBaseFee + gasForecast.predictedPriority);
   // Match gas cost denomination to amountIn: WEI for WETH inputs, 6-dec USDC otherwise
   const gasCostInInputUnits = isWethInput
     ? gasCostWei

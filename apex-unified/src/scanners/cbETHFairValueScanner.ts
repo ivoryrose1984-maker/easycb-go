@@ -100,7 +100,7 @@ export class CbEthFairValueScanner {
       filterResult:  'pass',
       skipReason:    null,
     });
-    executeDryRun(result.opportunity);
+    void executeDryRun(result.opportunity);
 
     return {
       strategyId,
