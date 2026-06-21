@@ -5,7 +5,7 @@ import { getCompetitionWindow, adjustedThreshold } from '../core/clock';
 import { Opportunity } from '../types/Opportunity';
 import { opportunityHash } from '../core/dedup';
 import { logger } from '../core/logger';
-import { isPoolValid } from '../core/startupValidator';
+import { isPoolValid, isFeedDisabled } from '../core/startupValidator';
 
 // ── cbETH exchange-rate oracle ────────────────────────────────────────────────────
 //
@@ -76,6 +76,7 @@ class CbEthRateOracle {
   private cbethL1:    ethers.Contract;
   private cachedRate: bigint | null = null;
   private cachedAt    = 0;
+  private _lastChainlinkErrLog = 0;  // throttle: log at most once per 5 minutes
 
   constructor(provider: ethers.Provider) {
     this.clCbEth = new ethers.Contract(CHAINLINK_CBETH_USD, CHAINLINK_ABI, provider);
@@ -96,31 +97,39 @@ class CbEthRateOracle {
 
     // 2. Chainlink cbETH/USD ÷ ETH/USD → cbETH/ETH (both feeds are 8-dec)
     //    cbETH/ETH (18-dec) = cbEthUsd * 1e18 / ethUsd
-    try {
-      const [[, cbEthUsd, , cbEthUpdated], [, ethUsd, , ethUpdated]] = await Promise.all([
-        this.clCbEth.latestRoundData() as Promise<[bigint, bigint, bigint, bigint, bigint]>,
-        this.clEth.latestRoundData()   as Promise<[bigint, bigint, bigint, bigint, bigint]>,
-      ]);
+    //    Only attempted if startup validation confirmed both feeds are live.
+    //    cbETH/USD feed is deprecated on Base — startup marks it disabled; skip silently.
+    if (!isFeedDisabled('chainlink:cbETH/USD') && !isFeedDisabled('chainlink:ETH/USD')) {
+      try {
+        const [[, cbEthUsd, , cbEthUpdated], [, ethUsd, , ethUpdated]] = await Promise.all([
+          this.clCbEth.latestRoundData() as Promise<[bigint, bigint, bigint, bigint, bigint]>,
+          this.clEth.latestRoundData()   as Promise<[bigint, bigint, bigint, bigint, bigint]>,
+        ]);
 
-      const oldestUpdate = Math.min(Number(cbEthUpdated), Number(ethUpdated));
-      const staleSecs    = Math.floor(Date.now() / 1000) - oldestUpdate;
+        const oldestUpdate = Math.min(Number(cbEthUpdated), Number(ethUpdated));
+        const staleSecs    = Math.floor(Date.now() / 1000) - oldestUpdate;
 
-      if (cbEthUsd > 0n && ethUsd > 0n && staleSecs < STALE_RATE_SECS) {
-        const rate = (BigInt(cbEthUsd) * 10n ** 18n) / BigInt(ethUsd);
-        this.cachedRate = rate;
-        this.cachedAt   = Date.now();
-        return { rate, source: `chainlink (age=${Math.round(staleSecs / 3600)}h)` };
-      }
-
-      if (cbEthUsd > 0n && ethUsd > 0n) {
-        logger.warn('cbETH', `Chainlink rate stale (${Math.round(staleSecs / 3600)}h old) — using cache`);
-        if (this.cachedRate === null) {
-          this.cachedRate = (BigInt(cbEthUsd) * 10n ** 18n) / BigInt(ethUsd);
+        if (cbEthUsd > 0n && ethUsd > 0n && staleSecs < STALE_RATE_SECS) {
+          const rate = (BigInt(cbEthUsd) * 10n ** 18n) / BigInt(ethUsd);
+          this.cachedRate = rate;
           this.cachedAt   = Date.now();
+          return { rate, source: `chainlink (age=${Math.round(staleSecs / 3600)}h)` };
+        }
+
+        if (cbEthUsd > 0n && ethUsd > 0n) {
+          logger.warn('cbETH', `Chainlink rate stale (${Math.round(staleSecs / 3600)}h old) — using cache`);
+          if (this.cachedRate === null) {
+            this.cachedRate = (BigInt(cbEthUsd) * 10n ** 18n) / BigInt(ethUsd);
+            this.cachedAt   = Date.now();
+          }
+        }
+      } catch (err: any) {
+        const now = Date.now();
+        if (now - this._lastChainlinkErrLog > 300_000) {
+          logger.warn('cbETH', `Chainlink feed error (throttled): ${err.message.slice(0, 100)}`);
+          this._lastChainlinkErrLog = now;
         }
       }
-    } catch (err: any) {
-      logger.warn('cbETH', `Chainlink feed error: ${err.message}`);
     }
 
     // 3. CoinGecko cbETH/USD ÷ ETH/USD (30s REST cache, no geo-block)
@@ -151,9 +160,10 @@ class CbEthRateOracle {
 }
 
 export class CbEthFairValueSignal {
-  private oracle:      CbEthRateOracle;
-  private uniQuoter:  ethers.Contract;
-  private cakeQuoter: ethers.Contract;
+  private oracle:           CbEthRateOracle;
+  private uniQuoter:       ethers.Contract;
+  private cakeQuoter:      ethers.Contract;
+  private _lastQuoterErrLog = 0;  // throttle: log at most once per 5 minutes
 
   constructor(provider: ethers.Provider) {
     this.oracle      = new CbEthRateOracle(provider);
@@ -216,7 +226,11 @@ export class CbEthFairValueSignal {
     const allErrors = [...uniErrs, ...cakeErrs];
 
     if (dexWethOut === null && allErrors.length > 0) {
-      logger.warn('cbETH', `Quoter failed all fee tiers: ${allErrors.join(' | ')}`);
+      const now = Date.now();
+      if (now - this._lastQuoterErrLog > 300_000) {
+        logger.warn('cbETH', `Quoter failed all fee tiers (throttled): ${allErrors.join(' | ')}`);
+        this._lastQuoterErrLog = now;
+      }
     }
 
     if (dexWethOut === null) {

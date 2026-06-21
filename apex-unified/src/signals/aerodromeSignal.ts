@@ -31,11 +31,11 @@ const VOLATILE_FEE_BPS = 30n;
 // Hardcoded — no RPC needed for token decimal lookup
 const TOKEN_DECIMALS: Record<string, number> = {
   [CONFIG.TOKENS.USDC.toLowerCase()]:  6,
-  [CONFIG.TOKENS.USDbC.toLowerCase()]: 6,
   [CONFIG.TOKENS.USDT.toLowerCase()]:  6,
   [CONFIG.TOKENS.DAI.toLowerCase()]:   18,
   [CONFIG.TOKENS.WETH.toLowerCase()]:  18,
   [CONFIG.TOKENS.cbETH.toLowerCase()]: 18,
+  [CONFIG.TOKENS.cbBTC.toLowerCase()]: 8,
   [CONFIG.TOKENS.AERO.toLowerCase()]:  18,
 };
 
