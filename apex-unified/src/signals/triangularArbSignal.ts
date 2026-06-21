@@ -107,10 +107,14 @@ export class TriangularArbSignal {
         tokenIn: tokens[2], tokenOut: tokens[0], amountIn: out2, fee: fees[2], sqrtPriceLimitX96: 0,
       });
       const finalOut: bigint = q3[0];
-      if (finalOut === 0n || finalOut <= amountIn) return null;
+      if (finalOut === 0n) return null;
 
       const grossProfit = finalOut - amountIn;
       const spreadBps   = Number((grossProfit * 10_000n) / amountIn);
+
+      if (finalOut <= amountIn) {
+        return { tokens, fees, amountIn, amountOut: finalOut, grossProfit, spreadBps, opportunity: null };
+      }
 
       const route = `USDC→${tokens[1].slice(0, 8)}…→${tokens[2].slice(0, 8)}…→USDC`;
       const hash  = opportunityHash({
