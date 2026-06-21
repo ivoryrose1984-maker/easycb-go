@@ -37,8 +37,9 @@ export interface DexSpreadResult {
 }
 
 export class DexSpreadSignal {
-  private uniQuoter:  ethers.Contract;
-  private cakeQuoter: ethers.Contract;
+  private uniQuoter:        ethers.Contract;
+  private cakeQuoter:       ethers.Contract;
+  private lastAnomalyLog  = new Map<string, number>();
 
   constructor(provider: ethers.Provider) {
     this.uniQuoter  = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER,  QUOTER_ABI, provider);
@@ -152,7 +153,11 @@ export class DexSpreadSignal {
 
       // Anomaly gate: |spread| > 2000bps = empty/thin pool artifact
       if (Math.abs(spreadBpsProbe) > 2000) {
-        logger.warn('DEX', `${pair.name} unit anomaly: spread=${spreadBpsProbe}bps — thin pool or no liquidity`);
+        const now = Date.now();
+        if ((now - (this.lastAnomalyLog.get(pair.name) ?? 0)) > 300_000) {
+          logger.warn('DEX', `${pair.name} unit anomaly: spread=${spreadBpsProbe}bps — thin pool or no liquidity`);
+          this.lastAnomalyLog.set(pair.name, now);
+        }
         logRejection({ strategyId: 'apex.dex_spread', blockNumber, pair: pair.name, spreadBps: spreadBpsProbe, reason: 'unit_anomaly' });
         return {
           pair:            pair.name,

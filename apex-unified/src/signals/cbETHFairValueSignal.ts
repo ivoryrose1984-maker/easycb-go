@@ -234,7 +234,6 @@ export class CbEthFairValueSignal {
     }
 
     if (dexWethOut === null) {
-      logger.warn('cbETH', 'No DEX quote available — skipping block');
       return null;
     }
     const resolvedOut = dexWethOut as bigint; // async closure mutation — TypeScript can't narrow, cast required
