@@ -271,6 +271,11 @@ export class DexSpreadSignal {
       });
 
       const finalIsOpportunity = spreadBps >= CONFIG.MIN_PROFIT_BPS && !thinPool;
+      // Live execution only possible on same-DEX arbs — single router handles both legs
+      const isSameDex          = bestBuy.dex === bestSell.dex;
+      const liveRouter         = isSameDex
+        ? (bestBuy.dex === 'uni-v3' ? CONFIG.CONTRACTS.UNI_ROUTER : CONFIG.CONTRACTS.CAKE_ROUTER)
+        : undefined;
 
       const opp: Opportunity = {
         timestamp:        new Date().toISOString(),
@@ -303,9 +308,14 @@ export class DexSpreadSignal {
             ? `thin_pool: ${CONFIG.LIQUIDITY_CHECK_SCALE}x_impact=${impactBps}bps > ${CONFIG.LIQUIDITY_MAX_IMPACT_BPS}bps`
             : `spread_below_threshold: ${spreadBps}bps < ${CONFIG.MIN_PROFIT_BPS}bps`
           : null,
-        safetyDecision:   'dry_run_only',
-        dryRunOnly:       true,
-        liveEligible:     false,
+        safetyDecision:   isSameDex ? 'live_eligible' : 'dry_run_only',
+        dryRunOnly:       !isSameDex,
+        liveEligible:     isSameDex,
+        ...(isSameDex && {
+          feeBuy:           bestBuy.fee,
+          feeSell:          bestSell.fee,
+          liveRouterAddress: liveRouter,
+        }),
       };
 
       const finalOpportunity = finalIsOpportunity ? opp : null;

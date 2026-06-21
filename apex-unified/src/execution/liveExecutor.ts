@@ -47,7 +47,8 @@ export async function executeLive(
       plan.route,
       BigInt(plan.minAmountOut),
     ];
-    const profitWei = BigInt(Math.round(plan.estimatedProfitUsd)) * USD_TO_WEI_AT_3K;
+    // Convert profit to wei with micro-dollar precision to avoid rounding sub-$1 profits to zero
+    const profitWei = BigInt(Math.round(plan.estimatedProfitUsd * 1_000_000)) * (USD_TO_WEI_AT_3K / 1_000_000n);
     try {
       const hash = await executor.execute('executeArbitrage', args, profitWei);
       if (hash) {
@@ -130,13 +131,20 @@ export async function executeLive(
       return { success: false, txHash: response.hash, builder: 'direct', error: 'tx reverted' };
     }
 
-    // Parse actual profit from ArbitrageExecuted event
+    // Parse actual profit from ArbitrageExecuted(token, amountIn, profit, taxAmount)
+    // Profit is in flash token units: USDC=6 dec, WETH=18 dec
+    const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
+    const isWethLoan   = plan.loanToken.toLowerCase() === WETH_ADDRESS.toLowerCase();
+    const ethPriceUsd6 = BigInt(plan.ethPriceUsd6);
     let actualGrossUsd: number | null = null;
     for (const log of receipt.logs) {
       if (log.topics[0] === ARBITRAGE_EXECUTED_TOPIC) {
         try {
-          const decoded = ethers.AbiCoder.defaultAbiCoder().decode(['uint256', 'uint256', 'uint256'], log.data);
-          actualGrossUsd = Number(decoded[1] as bigint) / 1e6;
+          const decoded  = ethers.AbiCoder.defaultAbiCoder().decode(['uint256', 'uint256', 'uint256'], log.data);
+          const profitRaw = decoded[1] as bigint;
+          actualGrossUsd = isWethLoan
+            ? Number(profitRaw * ethPriceUsd6 / 10n ** 18n) / 1e6   // wei → USD via ETH price
+            : Number(profitRaw) / 1e6;                                // USDC base units → USD
         } catch {}
         break;
       }

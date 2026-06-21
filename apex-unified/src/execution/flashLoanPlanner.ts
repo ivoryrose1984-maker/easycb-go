@@ -100,9 +100,10 @@ export function breakEvenEdgeBps(
   loanAmountUsd6: bigint, // loan in 6-dec USDC
 ): number {
   if (loanAmountUsd6 === 0n) return 9_999;
-  const gasCostWei      = CONFIG.GAS_ESTIMATE * gasForecast.predictedBaseFee;
-  const gasCostUsd6     = (gasCostWei * ethPriceUsd6) / 10n ** 18n;
-  const gasBps          = Number(gasCostUsd6 * 10_000n / loanAmountUsd6);
+  // Include both base fee AND priority fee — omitting priority understated threshold by ~1.5 bps
+  const gasCostWei  = CONFIG.GAS_ESTIMATE * (gasForecast.predictedBaseFee + gasForecast.predictedPriority);
+  const gasCostUsd6 = (gasCostWei * ethPriceUsd6) / 10n ** 18n;
+  const gasBps      = Number(gasCostUsd6 * 10_000n / loanAmountUsd6);
   return gasBps + CONFIG.LATENCY_BUFFER_BPS + CONFIG.FAILURE_BUFFER_BPS;
 }
 
@@ -118,7 +119,6 @@ export interface ProfitResult {
 
 export function calculateNetProfit(
   amountIn:    bigint,
-  buyQuote:    bigint,
   sellQuote:   bigint,
   gasForecast: GasForecast,
   ethPriceUsd: bigint,
@@ -173,7 +173,7 @@ export function buildExecutionPlan(
     opp.tokenIn,  // round-trip: repay same token as loan
   );
 
-  const profit = calculateNetProfit(loanAmount, loanAmount, sellQuote, gasForecast, ethPriceUsd, isWethInput);
+  const profit = calculateNetProfit(loanAmount, sellQuote, gasForecast, ethPriceUsd, isWethInput);
   const maxFeePerGas = gasForecast.predictedBaseFee * CONFIG.BASE_FEE_MULTIPLIER + profit.priorityFeePerGas;
 
   const estimatedProfitUsd = profit.netProfit > 0n
@@ -195,6 +195,7 @@ export function buildExecutionPlan(
     targetBlock:          opp.blockNumber + 1,
     builderUrls:          CONFIG.BUILDERS.filter(b => b.enabled).map(b => b.url),
     estimatedProfitUsd,
+    ethPriceUsd6:         ethPriceUsd.toString(),
   };
 }
 

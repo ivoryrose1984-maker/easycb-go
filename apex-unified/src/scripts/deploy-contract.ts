@@ -29,9 +29,9 @@ const CAKE_V3_ROUTER = '0x1b81D678ffb9C0263b24A97847620C99d213eB14';
 
 async function main(): Promise<void> {
   // ── Safety checks ──────────────────────────────────────────────────────────
-  const privateKey = process.env.PRIVATE_KEY;
+  const privateKey = process.env.WALLET_PRIVATE_KEY;
   if (!privateKey) {
-    console.error('PRIVATE_KEY not set in .env');
+    console.error('WALLET_PRIVATE_KEY not set in .env');
     process.exit(1);
   }
 

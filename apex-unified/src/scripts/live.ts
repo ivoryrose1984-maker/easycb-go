@@ -1,5 +1,5 @@
 import CONFIG                     from '../core/config';
-import { assertDryRunMode }        from '../core/safety';
+import { requireLiveAllowed }      from '../core/safety';
 import { getRunContext, uptime }   from '../core/runContext';
 import { logger }                  from '../core/logger';
 import { logSummary, logError }    from '../core/jsonlLogger';
@@ -14,25 +14,23 @@ import { AerodromeScanner }        from '../scanners/aerodromeScanner';
 import { checkCircuitBreaker, setInitialBalance } from '../risk/circuitBreaker';
 import { acquireLock }             from '../risk/networkMutex';
 import { FastPathExecutor }        from '../execution/FastPathExecutor';
+import { setupExecutor, updateExecutorEthPrice } from '../execution/dryRunExecutor';
 import { getHttpProvider }         from '../infrastructure/fallbackProvider';
 import { runStartupValidation }    from '../core/startupValidator';
+import { setCachedBlock }          from '../core/rpcHealth';
 import { ethers }                  from 'ethers';
 
 const APEX_ABI = [
   'function executeArbitrage(address flashToken, uint256 flashAmount, address uniV3Router, bytes calldata path, uint256 minAmountOut) external',
 ];
 
-// ── Safety first ──────────────────────────────────────────────────────────────
-assertDryRunMode();
+// ── Safety — this must be the FIRST thing that runs ──────────────────────────
+requireLiveAllowed();   // throws if DRY_RUN=true / ALLOW_LIVE!=true / WALLET_PRIVATE_KEY missing / contract not deployed
 
 if (parseInt(process.env.CHAIN_ID ?? '8453', 10) !== 8453) {
   throw new Error(`CHAIN_ID must be 8453 (Base), got ${process.env.CHAIN_ID}`);
 }
 
-// Provider errors, CEX feed reconnects, and gas forecaster failures surface here.
-// Rate-limit errors (code 15 / "Too many request") on eth_subscribe surface here as
-// unhandled rejections from ethers internals — mark the RPC health so the socket
-// close handler uses the rate-limit backoff floor instead of reconnecting immediately.
 process.on('unhandledRejection', (reason) => {
   const errCode = (reason as any)?.error?.code;
   const msg     = reason instanceof Error ? reason.stack ?? reason.message : String(reason);
@@ -43,18 +41,16 @@ process.on('unhandledRejection', (reason) => {
   if (isRateLimit) {
     rpcHealth.mark429();
     logger.warn('RPC', 'Rate-limit on eth_subscribe (code 15) — RWS will back off and reconnect');
-    return; // Not a crash — ResilientWsProvider handles the socket close + retry
+    return;
   }
 
   logger.error('FATAL', `unhandledRejection: ${msg}`);
   logError({ timestamp: new Date().toISOString(), block: 0, error: `unhandledRejection: ${msg}` });
-  // Do NOT exit — let the ResilientWsProvider's reconnect loop handle provider failures.
 });
 
 process.on('uncaughtException', (err) => {
   logger.error('FATAL', `uncaughtException: ${err.stack ?? err.message}`);
   logError({ timestamp: new Date().toISOString(), block: 0, error: `uncaughtException: ${err.message}` });
-  // Exit on uncaught synchronous exceptions — these indicate a coding bug, not a transient failure.
   process.exit(1);
 });
 
@@ -83,61 +79,54 @@ interface BotContext {
 }
 
 function buildContext(p: ethers.WebSocketProvider): BotContext {
-  // Route all RPC reads (quotes, Chainlink calls) through the HTTP FallbackProvider when
-  // BASE_HTTPS_URL(S) is configured, so a WebSocket stall doesn't blind quoting.
-  // Falls back to the WSS provider transparently if no HTTP URL is set.
   const http: ethers.Provider = getHttpProvider() ?? p;
   return {
     provider:     p,
     quoter:       new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER, QUOTER_ABI, http),
-    cbethScanner: CONFIG.ENABLE_CBETH_SIGNAL       ? new CbEthFairValueScanner(http) : null,
-    pairScanner:  CONFIG.ENABLE_DEX_SPREAD_SIGNAL   ? new ApexPairScanner(http)       : null,
-    triScanner:   CONFIG.ENABLE_TRIANGULAR_SIGNAL   ? new ApexTriangularScanner(http) : null,
-    aeroScanner:  CONFIG.ENABLE_AERODROME_SIGNAL    ? new AerodromeScanner(http)      : null,
+    cbethScanner: CONFIG.ENABLE_CBETH_SIGNAL     ? new CbEthFairValueScanner(http) : null,
+    pairScanner:  CONFIG.ENABLE_DEX_SPREAD_SIGNAL ? new ApexPairScanner(http)       : null,
+    triScanner:   CONFIG.ENABLE_TRIANGULAR_SIGNAL ? new ApexTriangularScanner(http) : null,
+    aeroScanner:  CONFIG.ENABLE_AERODROME_SIGNAL  ? new AerodromeScanner(http)      : null,
   };
 }
 
-// ── Module-level state ──────────────────────────────────────────────────
-let ctx:           BotContext | null = null;
-let handlerActive  = false;
-let fastExec:      FastPathExecutor | null = null;
+let ctx:          BotContext | null = null;
+let handlerActive = false;
+let fastExec:     FastPathExecutor | null = null;
 
-// ETH price cache — reset on reconnect (new provider = new quoter)
+// Wallet — created once; provider is attached on each (re)connect
+const wallet = new ethers.Wallet(process.env.WALLET_PRIVATE_KEY!);
+
 let cachedEthPrice = 0n;
 let lastEthPriceMs = 0;
 
-async function getEthPrice(): Promise<bigint> {
-  if (!ctx) return 3_000_000_000n;
+async function getEthPrice(quoter: ethers.Contract): Promise<bigint> {
   if (cachedEthPrice > 0n && Date.now() - lastEthPriceMs < CONFIG.ETH_PRICE_CACHE_MS) {
     return cachedEthPrice;
   }
   try {
-    const r = await ctx.quoter.quoteExactInputSingle.staticCall({
+    const r = await quoter.quoteExactInputSingle.staticCall({
       tokenIn: CONFIG.TOKENS.WETH, tokenOut: CONFIG.TOKENS.USDC,
       amountIn: ethers.parseEther('1'), fee: 3000, sqrtPriceLimitX96: 0,
     });
     cachedEthPrice = r[0];
     lastEthPriceMs = Date.now();
+    updateExecutorEthPrice(cachedEthPrice);
     return cachedEthPrice;
-  } catch { return 3_000_000_000n; }
+  } catch { return cachedEthPrice > 0n ? cachedEthPrice : 3_000_000_000n; }
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
   console.log('╔═══════════════════════════════════════════════════════════════╗');
-  console.log('║         A P E X   U N I F I E D   B O T                     ║');
+  console.log('║         A P E X   U N I F I E D   B O T   — L I V E        ║');
   console.log('║  Atlas thinks  ·  Grok sees  ·  Apex executes                ║');
   console.log('╚═══════════════════════════════════════════════════════════════╝');
-  console.log(`  BOT_ID:      ${runCtx.botId}`);
-  console.log(`  RUN_ID:      ${runCtx.runId}`);
-  console.log(`  CHAIN:       Base (${runCtx.chainId})`);
-  console.log(`  MODE:        DRY RUN — zero transactions`);
-  console.log(`  Strategies:  ${[
-    CONFIG.ENABLE_DEX_SPREAD_SIGNAL  ? 'apex.dex_spread'         : '',
-    CONFIG.ENABLE_TRIANGULAR_SIGNAL  ? 'apex.triangular'         : '',
-    CONFIG.ENABLE_CBETH_SIGNAL       ? 'grok.cbeth_fair_value'   : '',
-    CONFIG.ENABLE_AERODROME_SIGNAL   ? 'apex.aerodrome_spread'   : '',
-  ].filter(Boolean).join(', ')}`);
+  console.log(`  BOT_ID:    ${runCtx.botId}`);
+  console.log(`  RUN_ID:    ${runCtx.runId}`);
+  console.log(`  CHAIN:     Base (${runCtx.chainId})`);
+  console.log(`  MODE:      LIVE EXECUTION — real transactions enabled`);
+  console.log(`  CONTRACT:  ${CONFIG.CONTRACTS.APEX_FLASH_LOAN}`);
+  console.log(`  WALLET:    ${wallet.address}`);
   console.log('');
 
   if (!acquireLock()) {
@@ -145,46 +134,44 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  await initTelegram(); // sends probe message on success; disables silently on failure
+  await initTelegram();
 
-  // FastPathExecutor for fee-cache warming (no wallet in dry run — execute() is a no-op)
   if (CONFIG.BASE_HTTPS_URL) {
     fastExec = new FastPathExecutor({
-      primaryRpc:   CONFIG.BASE_HTTPS_URL,
+      wallet:      wallet,
+      primaryRpc:  CONFIG.BASE_HTTPS_URL,
       sequencerRpc: CONFIG.BASE_SEQUENCER_URL,
-      chainId:      CONFIG.CHAIN_ID,
-      contract:     CONFIG.CONTRACTS.APEX_FLASH_LOAN,
-      abi:          APEX_ABI,
+      chainId:     CONFIG.CHAIN_ID,
+      contract:    CONFIG.CONTRACTS.APEX_FLASH_LOAN,
+      abi:         APEX_ABI,
     });
     await fastExec.init();
-    logger.info('MAIN', 'FastPathExecutor active — fee cache will warm each block');
+    logger.info('MAIN', 'FastPathExecutor active with wallet — live trades via dual-broadcast');
   } else {
-    logger.warn('MAIN', 'BASE_HTTPS_URL not set — FastPathExecutor disabled (add to .env)');
+    logger.warn('MAIN', 'BASE_HTTPS_URL not set — FastPathExecutor disabled; falling back to slow path');
   }
 
   if (CONFIG.ENABLE_CEX_CONTEXT && CONFIG.ENABLE_BINANCE) {
     logger.info('MAIN', 'Starting Binance CEX feed...');
     getCexFeed();
     await new Promise(r => setTimeout(r, 2_000));
-  } else if (CONFIG.ENABLE_CEX_CONTEXT && !CONFIG.ENABLE_BINANCE) {
-    logger.warn('MAIN', 'ENABLE_BINANCE=false — CEX feed disabled (Hetzner geo-blocked; set true if your IP allows Binance)');
   }
 
-  const monitorAddress  = process.env.WALLET_ADDRESS ?? process.env.MONITOR_ADDRESS ?? '';
-  let   initialBalSet   = false;
-  let   firstConnect    = true;
+  const monitorAddress = wallet.address;
+  let   initialBalSet  = false;
+  let   firstConnect   = true;
 
-  // ── ResilientWsProvider ──────────────────────────────────────────────
   const rws = new ResilientWsProvider(CONFIG.ALCHEMY_WSS_URL, CONFIG.CHAIN_ID);
 
-  // Rebuild scan context on every (re)connect — scanners hold provider refs
   rws.onConnect(async (provider) => {
+    const connectedWallet = wallet.connect(provider);
     ctx            = buildContext(provider);
     cachedEthPrice = 0n;
     lastEthPriceMs = 0;
 
-    // Run startup validation once on first connect (non-blocking — populates pool
-    // filter over ~30s; scans run permissively until validation completes)
+    // Wire live execution with fresh provider + wallet on every (re)connect
+    setupExecutor(connectedWallet, provider, fastExec, cachedEthPrice);
+
     if (firstConnect) {
       const httpOrWs: ethers.Provider = getHttpProvider() ?? provider;
       runStartupValidation(httpOrWs).catch((e: any) =>
@@ -192,22 +179,21 @@ async function main(): Promise<void> {
       );
     }
 
-    // Circuit breaker: set baseline balance only on first connect
-    if (monitorAddress && !initialBalSet) {
+    if (!initialBalSet) {
       try {
         const bal = await provider.getBalance(monitorAddress);
         setInitialBalance(bal);
         initialBalSet = true;
+        logger.info('MAIN', `Wallet ${monitorAddress} balance: ${ethers.formatEther(bal)} ETH`);
       } catch (e: any) {
-        logger.warn('MAIN', `Could not read initial balance: ${e.message}`);
+        logger.warn('MAIN', `Could not read wallet balance: ${e.message}`);
       }
     }
 
-    if (!firstConnect) sendAlert('WebSocket reconnected — dry run resumed');
+    if (!firstConnect) sendAlert('WebSocket reconnected — live trading resumed');
     firstConnect = false;
   });
 
-  // Main block handler — registered on rws, replayed on every reconnect
   rws.on('block', async (blockNum: number) => {
     if (handlerActive || !ctx) {
       if (handlerActive) logger.debug('MAIN', `Block ${blockNum} skipped — previous scan still running`);
@@ -215,10 +201,11 @@ async function main(): Promise<void> {
     }
     handlerActive = true;
     stats.blocks++;
-    fastExec?.onBlock(blockNum); // fee-cache warmup — fire-and-forget
+    fastExec?.onBlock(blockNum);
+    setCachedBlock(blockNum);
 
     try {
-      const ethPrice = await getEthPrice();
+      const ethPrice = await getEthPrice(ctx.quoter);
 
       const [cbethResult, pairResult, triResult, aeroResult] = await Promise.all([
         ctx.cbethScanner?.scan(getHttpProvider() ?? ctx.provider, blockNum) ?? Promise.resolve(null),
@@ -250,15 +237,12 @@ async function main(): Promise<void> {
     }
   });
 
-  // ── Circuit breaker polling ─────────────────────────────────────────────
   if (monitorAddress) {
     setInterval(() => {
-      // rws.provider may be null/stale during reconnect — skip silently
       try { checkCircuitBreaker(rws.provider, monitorAddress); } catch {}
     }, 30_000);
   }
 
-  // ── Hourly summary ──────────────────────────────────────────────────────
   setInterval(() => {
     const up = uptime(START);
     const summary = {
@@ -273,7 +257,6 @@ async function main(): Promise<void> {
       total_opps:  stats.cbeth.opps + stats.dexSpread.opps + stats.triangular.opps + stats.aerodrome.opps,
       errors:      stats.cbeth.errors + stats.dexSpread.errors + stats.triangular.errors + stats.aerodrome.errors,
     };
-
     logSummary(summary);
     logger.info('HOURLY',
       `${up} | blocks=${stats.blocks} | ` +
@@ -282,16 +265,15 @@ async function main(): Promise<void> {
       `errors=${summary.errors}`,
     );
     sendAlert(
-      `Hourly summary — ${up}\n` +
+      `[LIVE] Hourly summary — ${up}\n` +
       `Blocks: ${stats.blocks}\n` +
-      `cbETH opps: ${stats.cbeth.opps}\n` +
-      `DEX spread opps: ${stats.dexSpread.opps}\n` +
+      `DEX spread opps executed: ${stats.dexSpread.opps}\n` +
       `Triangular opps: ${stats.triangular.opps}\n` +
+      `cbETH opps: ${stats.cbeth.opps}\n` +
       `Aerodrome opps: ${stats.aerodrome.opps}`,
     );
   }, 60 * 60 * 1_000);
 
-  // ── Graceful shutdown ──────────────────────────────────────────────────
   async function shutdown(signal: string) {
     logger.info('MAIN', `${signal} received — shutting down`);
     await rws.destroy();
@@ -300,10 +282,9 @@ async function main(): Promise<void> {
   process.on('SIGINT',  () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  // ── Connect ──────────────────────────────────────────────────────────────
-  logger.info('MAIN', 'Connecting to Base via WebSocket...');
+  logger.info('MAIN', 'Connecting to Base via WebSocket — LIVE MODE');
   await rws.start();
-  logger.info('MAIN', 'Connected — scanning started');
+  logger.info('MAIN', 'Connected — live scanning started');
 }
 
 main().catch(err => {

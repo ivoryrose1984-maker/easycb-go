@@ -10,10 +10,16 @@ import CONFIG               from '../core/config';
 import { StrategyResult }   from '../types/StrategyResult';
 
 const PAIRS = [
+  // Volatile pairs — Aerodrome vs Uni V3 + PancakeSwap V3
   { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.WETH,  name: 'USDC/WETH',  stable: false },
   { tokenIn: CONFIG.TOKENS.WETH,  tokenOut: CONFIG.TOKENS.cbETH, name: 'WETH/cbETH', stable: false },
+  { tokenIn: CONFIG.TOKENS.WETH,  tokenOut: CONFIG.TOKENS.AERO,  name: 'WETH/AERO',  stable: false },
   { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.AERO,  name: 'USDC/AERO',  stable: false },
+  { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.cbBTC, name: 'USDC/cbBTC', stable: false },
+  { tokenIn: CONFIG.TOKENS.WETH,  tokenOut: CONFIG.TOKENS.cbBTC, name: 'WETH/cbBTC', stable: false },
+  // Stable pairs — Aerodrome Solidly AMM vs Uni V3 + PancakeSwap V3
   { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.DAI,   name: 'USDC/DAI',   stable: true  },
+  { tokenIn: CONFIG.TOKENS.USDC,  tokenOut: CONFIG.TOKENS.USDT,  name: 'USDC/USDT',  stable: true  },
 ];
 
 export class AerodromeScanner {

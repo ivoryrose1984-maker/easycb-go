@@ -27,3 +27,4 @@ dashboard/.next/
 .DS_Store
 .idea/
 *.swp
+apex-unified/compiled/

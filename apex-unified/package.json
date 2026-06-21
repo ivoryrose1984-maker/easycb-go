@@ -6,9 +6,10 @@
   "scripts": {
     "build":          "tsc",
     "dry-run":        "npm run build && node dist/scripts/dry-run.js",
+    "live":           "npm run build && node dist/scripts/live.js",
     "report":         "npm run build && node dist/scripts/generate-report.js",
     "replay":         "npm run build && node dist/scripts/replay.js",
-    "compile":        "mkdir -p compiled && npx solc@0.8.19 --bin --abi --optimize --optimize-runs 200 --output-dir compiled src/contracts/ApexFlashLoan.sol",
+    "compile":        "mkdir -p compiled && npx solc@0.8.19 --bin --abi --optimize --optimize-runs 200 --output-dir compiled src/contracts/ApexFlashLoan.sol && cp compiled/src_contracts_ApexFlashLoan_sol_ApexFlashLoan.bin compiled/ApexFlashLoan.bin && cp compiled/src_contracts_ApexFlashLoan_sol_ApexFlashLoan.abi compiled/ApexFlashLoan.abi",
     "deploy":         "npm run build && npm run compile && node dist/scripts/deploy-contract.js",
     "test":           "jest --runInBand",
     "verify":         "npm run build && npm test && npm run report"

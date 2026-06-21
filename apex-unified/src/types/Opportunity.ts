@@ -49,4 +49,9 @@ export interface Opportunity {
   safetyDecision:    SafetyDecision;
   dryRunOnly:        boolean;
   liveEligible:      boolean;
+
+  // Live execution routing — populated only when liveEligible=true and !crossDex
+  feeBuy?:            number;  // buy-leg fee tier
+  feeSell?:           number;  // sell-leg fee tier
+  liveRouterAddress?: string;  // single router for both legs (same-DEX arbs only)
 }

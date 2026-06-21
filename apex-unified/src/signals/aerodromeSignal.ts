@@ -17,11 +17,12 @@ const POOL_ABI = [
   'function token0() view returns (address)',
 ];
 
-const UNI_QUOTER_ABI = [
+const QUOTER_ABI = [
   'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut,uint160,uint32,uint256)',
 ];
 
-const UNI_FEES = [100, 500, 3000, 10000];
+const UNI_FEES  = [100, 500, 3000, 10000];
+const CAKE_FEES = [100, 500, 2500, 10000];  // PancakeSwap V3: 2500 replaces 3000
 
 // Stable pool: 0.05% default; volatile: 0.3% default (Aerodrome V2 standard)
 const STABLE_FEE_BPS   = 5n;
@@ -55,17 +56,19 @@ export interface AerodromeSpreadResult {
 }
 
 export class AerodromeSignal {
-  private readonly factory:   ethers.Contract;
-  private readonly uniQuoter: ethers.Contract;
-  private readonly provider:  ethers.Provider;
+  private readonly factory:    ethers.Contract;
+  private readonly uniQuoter:  ethers.Contract;
+  private readonly cakeQuoter: ethers.Contract;
+  private readonly provider:   ethers.Provider;
 
   // Pool address cache — factory calls are stable; no need to re-fetch each block.
   private readonly poolCache = new Map<string, string>();
 
   constructor(provider: ethers.Provider) {
-    this.provider  = provider;
-    this.factory   = new ethers.Contract(CONFIG.CONTRACTS.AERODROME_FACTORY, FACTORY_ABI, provider);
-    this.uniQuoter = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER,        UNI_QUOTER_ABI, provider);
+    this.provider    = provider;
+    this.factory     = new ethers.Contract(CONFIG.CONTRACTS.AERODROME_FACTORY, FACTORY_ABI,  provider);
+    this.uniQuoter   = new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER,        QUOTER_ABI,   provider);
+    this.cakeQuoter  = new ethers.Contract(CONFIG.CONTRACTS.CAKE_QUOTER,       QUOTER_ABI,   provider);
   }
 
   private async getPoolAddress(tokenA: string, tokenB: string, stable: boolean): Promise<string | null> {
@@ -120,11 +123,17 @@ export class AerodromeSignal {
     ethPriceUsd: bigint = 3_000_000_000n,
   ): Promise<AerodromeSpreadResult | null> {
     try {
-      // ── Buy leg: tokenIn → tokenOut (Aerodrome off-chain + Uni V3) ──────────
-      const [aeroBuyOut, uniBuyRaw] = await Promise.all([
+      // ── Buy leg: tokenIn → tokenOut (Aerodrome + Uni V3 + PancakeSwap V3) ──
+      const [aeroBuyOut, uniBuyRaw, cakeBuyRaw] = await Promise.all([
         this.getAeroQuote(pair.tokenIn, pair.tokenOut, pair.stable, loanAmount),
         Promise.all(UNI_FEES.map(fee =>
           this.uniQuoter.quoteExactInputSingle.staticCall({
+            tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
+            amountIn: loanAmount, fee, sqrtPriceLimitX96: 0,
+          }).then((r: any) => r[0] as bigint).catch(() => 0n)
+        )),
+        Promise.all(CAKE_FEES.map(fee =>
+          this.cakeQuoter.quoteExactInputSingle.staticCall({
             tokenIn: pair.tokenIn, tokenOut: pair.tokenOut,
             amountIn: loanAmount, fee, sqrtPriceLimitX96: 0,
           }).then((r: any) => r[0] as bigint).catch(() => 0n)
@@ -133,37 +142,53 @@ export class AerodromeSignal {
 
       const bestUniBuy    = uniBuyRaw.reduce((a, b) => b > a ? b : a, 0n);
       const bestUniBuyFee = UNI_FEES[uniBuyRaw.indexOf(bestUniBuy)] ?? 3000;
+      const bestCakeBuy   = cakeBuyRaw.reduce((a, b) => b > a ? b : a, 0n);
+      const bestCakeBuyFee = CAKE_FEES[cakeBuyRaw.indexOf(bestCakeBuy)] ?? 2500;
 
-      const buyOnAero  = aeroBuyOut > bestUniBuy && aeroBuyOut > 0n;
-      const bestBuyOut = buyOnAero ? aeroBuyOut : bestUniBuy;
-      const bestBuyDex = buyOnAero ? 'aerodrome' : `uni-v3@${bestUniBuyFee}`;
+      const bestCexBuy    = bestUniBuy > bestCakeBuy ? bestUniBuy : bestCakeBuy;
+      const bestCexBuyDex = bestUniBuy > bestCakeBuy ? `uni-v3@${bestUniBuyFee}` : `cake-v3@${bestCakeBuyFee}`;
+
+      const buyOnAero  = aeroBuyOut > bestCexBuy && aeroBuyOut > 0n;
+      const bestBuyOut = buyOnAero ? aeroBuyOut : bestCexBuy;
+      const bestBuyDex = buyOnAero ? 'aerodrome' : bestCexBuyDex;
 
       if (bestBuyOut === 0n) return null;
 
-      // ── Sell leg: tokenOut → tokenIn (Aerodrome off-chain + Uni V3) ─────────
-      const [aeroSellOut, uniSellRaw] = await Promise.all([
+      // ── Sell leg: tokenOut → tokenIn (Aerodrome + Uni V3 + PancakeSwap V3) ─
+      const [aeroSellOut, uniSellRaw, cakeSellRaw] = await Promise.all([
         this.getAeroQuote(pair.tokenOut, pair.tokenIn, pair.stable, bestBuyOut),
-        Promise.all(UNI_FEES.map(fee => {
-          if (!buyOnAero && fee === bestUniBuyFee) return Promise.resolve(0n);
-          return this.uniQuoter.quoteExactInputSingle.staticCall({
+        Promise.all(UNI_FEES.map(fee =>
+          this.uniQuoter.quoteExactInputSingle.staticCall({
             tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
             amountIn: bestBuyOut, fee, sqrtPriceLimitX96: 0,
-          }).then((r: any) => r[0] as bigint).catch(() => 0n);
-        })),
+          }).then((r: any) => r[0] as bigint).catch(() => 0n)
+        )),
+        Promise.all(CAKE_FEES.map(fee =>
+          this.cakeQuoter.quoteExactInputSingle.staticCall({
+            tokenIn: pair.tokenOut, tokenOut: pair.tokenIn,
+            amountIn: bestBuyOut, fee, sqrtPriceLimitX96: 0,
+          }).then((r: any) => r[0] as bigint).catch(() => 0n)
+        )),
       ]);
 
-      const bestUniSell    = uniSellRaw.reduce((a, b) => b > a ? b : a, 0n);
-      const bestUniSellFee = UNI_FEES[uniSellRaw.indexOf(bestUniSell)] ?? 3000;
+      const bestUniSell     = uniSellRaw.reduce((a, b) => b > a ? b : a, 0n);
+      const bestUniSellFee  = UNI_FEES[uniSellRaw.indexOf(bestUniSell)] ?? 3000;
+      const bestCakeSell    = cakeSellRaw.reduce((a, b) => b > a ? b : a, 0n);
+      const bestCakeSellFee = CAKE_FEES[cakeSellRaw.indexOf(bestCakeSell)] ?? 2500;
 
-      const sellOnAero  = aeroSellOut > bestUniSell && aeroSellOut > 0n;
-      const bestSellOut = sellOnAero ? aeroSellOut : bestUniSell;
-      const bestSellDex = sellOnAero ? 'aerodrome' : `uni-v3@${bestUniSellFee}`;
+      const bestCexSell    = bestUniSell > bestCakeSell ? bestUniSell : bestCakeSell;
+      const bestCexSellDex = bestUniSell > bestCakeSell ? `uni-v3@${bestUniSellFee}` : `cake-v3@${bestCakeSellFee}`;
+
+      const sellOnAero  = aeroSellOut > bestCexSell && aeroSellOut > 0n;
+      const bestSellOut = sellOnAero ? aeroSellOut : bestCexSell;
+      const bestSellDex = sellOnAero ? 'aerodrome' : bestCexSellDex;
 
       if (bestSellOut === 0n) return null;
 
-      // Reject same-DEX round-trips — no cross-DEX edge
-      if (bestBuyDex.startsWith('uni-v3') && bestSellDex.startsWith('uni-v3')) return null;
-      if (bestBuyDex === 'aerodrome'       && bestSellDex === 'aerodrome')       return null;
+      // Reject same-DEX round-trips — no edge if both legs use the same protocol
+      const buyProto  = bestBuyDex.split('@')[0];
+      const sellProto = bestSellDex.split('@')[0];
+      if (buyProto === sellProto) return null;
 
       const spreadBps = loanAmount > 0n
         ? Number(((bestSellOut - loanAmount) * 10_000n) / loanAmount)

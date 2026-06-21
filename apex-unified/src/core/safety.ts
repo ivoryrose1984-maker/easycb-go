@@ -15,8 +15,8 @@ export function checkExecutionAllowed(): GateResult {
   if (CONFIG.CHAIN_ID !== 8453) {
     return { allowed: false, reason: `Wrong chain ${CONFIG.CHAIN_ID} — only Base (8453) allowed` };
   }
-  if (!process.env.PRIVATE_KEY) {
-    return { allowed: false, reason: 'PRIVATE_KEY not set — cannot sign transactions' };
+  if (!process.env.WALLET_PRIVATE_KEY) {
+    return { allowed: false, reason: 'WALLET_PRIVATE_KEY not set — cannot sign transactions' };
   }
   if (CONFIG.CONTRACTS.APEX_FLASH_LOAN === '0x0000000000000000000000000000000000000000') {
     return { allowed: false, reason: 'APEX_FLASH_LOAN_BASE is zero address — deploy contract first' };
