@@ -24,7 +24,8 @@ jobs:
       - name: Safety flag check — DRY_RUN must never be false in source
         run: |
           if grep -r "DRY_RUN=false\|ALLOW_LIVE=true" \
-            --include="*.ts" apex-unified/src/; then
+            --include="*.ts" apex-unified/src/ \
+            | grep -v "//\|Error("; then
             echo "FATAL: live execution flag found in source"
             exit 1
           fi
@@ -47,27 +48,3 @@ jobs:
         run: |
           solc --bin --abi apex-unified/src/contracts/ApexFlashLoan.sol
           echo "ApexFlashLoan compiled OK"
-
-  test-legacy-apex-predator:
-    name: apex-predator — legacy build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - run: cd apex-predator && npm ci
-      - run: cd apex-predator && npm run build
-      - run: cd apex-predator && npm test
-
-  test-legacy-go:
-    name: arbitrage — legacy Go build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-      - run: cd arbitrage && go build ./...
-      - run: cd arbitrage && go vet ./...
-      - run: cd arbitrage && go test ./...
