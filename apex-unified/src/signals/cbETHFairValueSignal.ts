@@ -35,8 +35,10 @@ const STALE_RATE_SECS  = 90_000;
 // Only used if Chainlink + cache both fail — logs ERROR every block it's used
 const CBETH_FALLBACK_RATE = 1_065_000_000_000_000_000n; // 1.065e18
 
-// Probe amount: 0.5 cbETH (18 dec). Named PROBE_CBETH to avoid confusion with WETH amounts.
-const PROBE_CBETH = ethers.parseEther('0.5');
+// Probe amount: 5 cbETH (18 dec). Scales gross profit ~10× vs 0.5 cbETH while keeping
+// gas cost negligible (gasAsBps drops from 1→0.1 bps). The ±200 bps anomaly gate catches
+// thin-pool price impact if the pool can't fill the larger size cleanly.
+const PROBE_CBETH = ethers.parseEther('5');
 
 // Uni V3 fee tiers to try for cbETH/WETH
 const UNI_FEE_TIERS  = [500, 100, 3000, 10000] as const;

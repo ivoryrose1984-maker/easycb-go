@@ -40,6 +40,7 @@ export const CONFIG = {
   ENABLE_DEX_SPREAD_SIGNAL:    flag('ENABLE_DEX_SPREAD_SIGNAL',    true),
   ENABLE_TRIANGULAR_SIGNAL:    flag('ENABLE_TRIANGULAR_SIGNAL',    true),
   ENABLE_CBETH_SIGNAL:         flag('ENABLE_CBETH_SIGNAL',         true),
+  ENABLE_CBBTC_SIGNAL:         flag('ENABLE_CBBTC_SIGNAL',         true),
   ENABLE_AERODROME_SIGNAL:     flag('ENABLE_AERODROME_SIGNAL',     true),
   ENABLE_CEX_CONTEXT:          flag('ENABLE_CEX_CONTEXT',          true),
   // Binance feed — default false: Hetzner/VPS IPs are geo-blocked (HTTP 451).
@@ -84,7 +85,10 @@ export const CONFIG = {
     CAKE_ROUTER:       '0x1b81D678ffb9C0263b24A97847620C99d213eB14',
     AERODROME_ROUTER:  '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43',
     AERODROME_FACTORY: '0x420DD381b31aEf6683db6B902084cB0FFECe40Da',
-    APEX_FLASH_LOAN:   process.env.APEX_FLASH_LOAN_BASE ?? '0x0000000000000000000000000000000000000000',
+    APEX_FLASH_LOAN:      process.env.APEX_FLASH_LOAN_BASE ?? '0x0000000000000000000000000000000000000000',
+    // Chainlink price feeds — Base mainnet (8 decimals, 3600s heartbeat)
+    CHAINLINK_ETH_USD:    '0x71041dddad3595F9CEd3DcCFBe3D1F4b0a16Bb70',
+    CHAINLINK_BTC_USD:    '0xCCADC697c55bbB68dc5bCdf8d3CBe83CdD4E071E',
   },
 
   // Base-compatible submission targets (ENABLE_BUILDER_SUBMISSION=false by default)

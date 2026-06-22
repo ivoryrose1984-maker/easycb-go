@@ -7,7 +7,7 @@ import * as fs              from 'fs';
 import * as path            from 'path';
 
 const STRATEGY_IDS: StrategyId[] = [
-  'apex.dex_spread', 'apex.triangular', 'grok.cbeth_fair_value', 'apex.aerodrome_spread',
+  'apex.dex_spread', 'apex.triangular', 'grok.cbeth_fair_value', 'grok.cbbtc_fair_value', 'apex.aerodrome_spread',
 ];
 
 function strategyEnabledInfo(id: string): { enabled: boolean; flagName: string } {
@@ -15,6 +15,7 @@ function strategyEnabledInfo(id: string): { enabled: boolean; flagName: string }
     case 'apex.dex_spread':       return { enabled: CONFIG.ENABLE_DEX_SPREAD_SIGNAL,  flagName: 'ENABLE_DEX_SPREAD_SIGNAL' };
     case 'apex.triangular':       return { enabled: CONFIG.ENABLE_TRIANGULAR_SIGNAL,   flagName: 'ENABLE_TRIANGULAR_SIGNAL' };
     case 'grok.cbeth_fair_value': return { enabled: CONFIG.ENABLE_CBETH_SIGNAL,        flagName: 'ENABLE_CBETH_SIGNAL' };
+    case 'grok.cbbtc_fair_value': return { enabled: CONFIG.ENABLE_CBBTC_SIGNAL,        flagName: 'ENABLE_CBBTC_SIGNAL' };
     case 'apex.aerodrome_spread': return { enabled: CONFIG.ENABLE_AERODROME_SIGNAL,    flagName: 'ENABLE_AERODROME_SIGNAL' };
     default:                      return { enabled: true, flagName: '' };
   }

@@ -282,16 +282,16 @@ export function destroyCexFeed(): void {
 
 const COINGECKO_URL =
   'https://api.coingecko.com/api/v3/simple/price' +
-  '?ids=ethereum,coinbase-wrapped-staked-eth&vs_currencies=usd';
+  '?ids=ethereum,coinbase-wrapped-staked-eth,bitcoin&vs_currencies=usd';
 
 const CG_CACHE_MS = 30_000;
 
-interface CgCache { ethUsd: number; cbethUsd: number; cbethRatio: number; fetchedAt: number }
+interface CgCache { ethUsd: number; cbethUsd: number; cbethRatio: number; btcUsd: number; fetchedAt: number }
 let _cgCache: CgCache | null = null;
 
-export async function getCoinGeckoPrice(): Promise<{ ethUsd: number; cbethUsd: number; cbethRatio: number } | null> {
+export async function getCoinGeckoPrice(): Promise<{ ethUsd: number; cbethUsd: number; cbethRatio: number; btcUsd: number } | null> {
   if (_cgCache && Date.now() - _cgCache.fetchedAt < CG_CACHE_MS) {
-    return { ethUsd: _cgCache.ethUsd, cbethUsd: _cgCache.cbethUsd, cbethRatio: _cgCache.cbethRatio };
+    return { ethUsd: _cgCache.ethUsd, cbethUsd: _cgCache.cbethUsd, cbethRatio: _cgCache.cbethRatio, btcUsd: _cgCache.btcUsd };
   }
   try {
     const res = await fetch(COINGECKO_URL);
@@ -299,12 +299,13 @@ export async function getCoinGeckoPrice(): Promise<{ ethUsd: number; cbethUsd: n
     const data = await res.json() as Record<string, { usd: number }>;
     const ethUsd   = data['ethereum']?.usd;
     const cbethUsd = data['coinbase-wrapped-staked-eth']?.usd;
-    if (!ethUsd || !cbethUsd) throw new Error('Missing price fields');
-    _cgCache = { ethUsd, cbethUsd, cbethRatio: cbethUsd / ethUsd, fetchedAt: Date.now() };
-    return { ethUsd: _cgCache.ethUsd, cbethUsd: _cgCache.cbethUsd, cbethRatio: _cgCache.cbethRatio };
+    const btcUsd   = data['bitcoin']?.usd;
+    if (!ethUsd || !cbethUsd || !btcUsd) throw new Error('Missing price fields');
+    _cgCache = { ethUsd, cbethUsd, cbethRatio: cbethUsd / ethUsd, btcUsd, fetchedAt: Date.now() };
+    return { ethUsd: _cgCache.ethUsd, cbethUsd: _cgCache.cbethUsd, cbethRatio: _cgCache.cbethRatio, btcUsd: _cgCache.btcUsd };
   } catch (err: any) {
     logger.warn('CEX', `CoinGecko fetch failed: ${err.message}${_cgCache ? ' — using stale cache' : ''}`);
-    if (_cgCache) return { ethUsd: _cgCache.ethUsd, cbethUsd: _cgCache.cbethUsd, cbethRatio: _cgCache.cbethRatio };
+    if (_cgCache) return { ethUsd: _cgCache.ethUsd, cbethUsd: _cgCache.cbethUsd, cbethRatio: _cgCache.cbethRatio, btcUsd: _cgCache.btcUsd };
     return null;
   }
 }

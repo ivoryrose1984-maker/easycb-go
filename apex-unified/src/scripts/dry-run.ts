@@ -8,6 +8,7 @@ import { rpcHealth }                           from '../core/rpcHealth';
 import { ResilientWsProvider }     from '../infrastructure/ResilientWsProvider';
 import { getCexFeed }              from '../signals/cexContextSignal';
 import { CbEthFairValueScanner }   from '../scanners/cbETHFairValueScanner';
+import { CbBtcFairValueScanner }   from '../scanners/cbBTCFairValueScanner';
 import { ApexPairScanner }         from '../scanners/apexPairScanner';
 import { ApexTriangularScanner }   from '../scanners/apexTriangularScanner';
 import { AerodromeScanner }        from '../scanners/aerodromeScanner';
@@ -66,6 +67,7 @@ const stats = {
   dexSpread:  { scans: 0, opps: 0, errors: 0 },
   triangular: { scans: 0, opps: 0, errors: 0 },
   cbeth:      { scans: 0, opps: 0, errors: 0 },
+  cbbtc:      { scans: 0, opps: 0, errors: 0 },
   aerodrome:  { scans: 0, opps: 0, errors: 0 },
 };
 
@@ -77,6 +79,7 @@ interface BotContext {
   provider:     ethers.WebSocketProvider;
   quoter:       ethers.Contract;
   cbethScanner: CbEthFairValueScanner  | null;
+  cbbtcScanner: CbBtcFairValueScanner  | null;
   pairScanner:  ApexPairScanner        | null;
   triScanner:   ApexTriangularScanner  | null;
   aeroScanner:  AerodromeScanner       | null;
@@ -90,7 +93,8 @@ function buildContext(p: ethers.WebSocketProvider): BotContext {
   return {
     provider:     p,
     quoter:       new ethers.Contract(CONFIG.CONTRACTS.UNI_QUOTER, QUOTER_ABI, http),
-    cbethScanner: CONFIG.ENABLE_CBETH_SIGNAL       ? new CbEthFairValueScanner(http) : null,
+    cbethScanner: CONFIG.ENABLE_CBETH_SIGNAL        ? new CbEthFairValueScanner(http) : null,
+    cbbtcScanner: CONFIG.ENABLE_CBBTC_SIGNAL        ? new CbBtcFairValueScanner(http) : null,
     pairScanner:  CONFIG.ENABLE_DEX_SPREAD_SIGNAL   ? new ApexPairScanner(http)       : null,
     triScanner:   CONFIG.ENABLE_TRIANGULAR_SIGNAL   ? new ApexTriangularScanner(http) : null,
     aeroScanner:  CONFIG.ENABLE_AERODROME_SIGNAL    ? new AerodromeScanner(http)      : null,
@@ -221,14 +225,16 @@ async function main(): Promise<void> {
     try {
       const ethPrice = await getEthPrice();
 
-      const [cbethResult, pairResult, triResult, aeroResult] = await Promise.all([
+      const [cbethResult, cbbtcResult, pairResult, triResult, aeroResult] = await Promise.all([
         ctx.cbethScanner?.scan(getHttpProvider() ?? ctx.provider, blockNum) ?? Promise.resolve(null),
+        ctx.cbbtcScanner?.scan(blockNum)               ?? Promise.resolve(null),
         ctx.pairScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
         ctx.triScanner?.scan(blockNum, ethPrice)       ?? Promise.resolve(null),
         ctx.aeroScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
       ]);
 
       if (cbethResult)  { stats.cbeth.scans      += cbethResult.scanned;  stats.cbeth.opps      += cbethResult.opportunities.length;  stats.cbeth.errors      += cbethResult.errors; }
+      if (cbbtcResult)  { stats.cbbtc.scans      += cbbtcResult.scanned;  stats.cbbtc.opps      += cbbtcResult.opportunities.length;  stats.cbbtc.errors      += cbbtcResult.errors; }
       if (pairResult)   { stats.dexSpread.scans  += pairResult.scanned;   stats.dexSpread.opps  += pairResult.opportunities.length;   stats.dexSpread.errors  += pairResult.errors; }
       if (triResult)    { stats.triangular.scans += triResult.scanned;    stats.triangular.opps += triResult.opportunities.length;    stats.triangular.errors += triResult.errors; }
       if (aeroResult)   { stats.aerodrome.scans  += aeroResult.scanned;   stats.aerodrome.opps  += aeroResult.opportunities.length;   stats.aerodrome.errors  += aeroResult.errors; }
@@ -238,6 +244,7 @@ async function main(): Promise<void> {
         logger.info('SCAN',
           `${up} | block=${blockNum} | ` +
           `cbeth=${stats.cbeth.opps}/${stats.cbeth.scans} ` +
+          `cbbtc=${stats.cbbtc.opps}/${stats.cbbtc.scans} ` +
           `dex=${stats.dexSpread.opps}/${stats.dexSpread.scans} ` +
           `tri=${stats.triangular.opps}/${stats.triangular.scans} ` +
           `aero=${stats.aerodrome.opps}/${stats.aerodrome.scans}`,
@@ -268,24 +275,26 @@ async function main(): Promise<void> {
       uptime:      up,
       blocks:      stats.blocks,
       cbeth_opps:  stats.cbeth.opps,
+      cbbtc_opps:  stats.cbbtc.opps,
       dex_opps:    stats.dexSpread.opps,
       tri_opps:    stats.triangular.opps,
       aero_opps:   stats.aerodrome.opps,
-      total_opps:  stats.cbeth.opps + stats.dexSpread.opps + stats.triangular.opps + stats.aerodrome.opps,
-      errors:      stats.cbeth.errors + stats.dexSpread.errors + stats.triangular.errors + stats.aerodrome.errors,
+      total_opps:  stats.cbeth.opps + stats.cbbtc.opps + stats.dexSpread.opps + stats.triangular.opps + stats.aerodrome.opps,
+      errors:      stats.cbeth.errors + stats.cbbtc.errors + stats.dexSpread.errors + stats.triangular.errors + stats.aerodrome.errors,
     };
 
     logSummary(summary);
     logger.info('HOURLY',
       `${up} | blocks=${stats.blocks} | ` +
       `total_opps=${summary.total_opps} ` +
-      `(cbeth=${stats.cbeth.opps} dex=${stats.dexSpread.opps} tri=${stats.triangular.opps} aero=${stats.aerodrome.opps}) ` +
+      `(cbeth=${stats.cbeth.opps} cbbtc=${stats.cbbtc.opps} dex=${stats.dexSpread.opps} tri=${stats.triangular.opps} aero=${stats.aerodrome.opps}) ` +
       `errors=${summary.errors}`,
     );
     sendAlert(
       `Hourly summary — ${up}\n` +
       `Blocks: ${stats.blocks}\n` +
       `cbETH opps: ${stats.cbeth.opps}\n` +
+      `cbBTC opps: ${stats.cbbtc.opps}\n` +
       `DEX spread opps: ${stats.dexSpread.opps}\n` +
       `Triangular opps: ${stats.triangular.opps}\n` +
       `Aerodrome opps: ${stats.aerodrome.opps}`,
