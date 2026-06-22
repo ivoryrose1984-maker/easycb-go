@@ -141,7 +141,7 @@ class CbEthRateOracle {
         const rate = BigInt(Math.round(cg.cbethRatio * 1e18));
         this.cachedRate = rate;
         this.cachedAt   = Date.now();
-        logger.info('cbETH', `Exchange rate from CoinGecko: ${cg.cbethRatio.toFixed(6)} (cbETH=$${cg.cbethUsd.toFixed(2)}, ETH=$${cg.ethUsd.toFixed(2)})`);
+        logger.debug('cbETH', `Exchange rate from CoinGecko: ${cg.cbethRatio.toFixed(6)} (cbETH=$${cg.cbethUsd.toFixed(2)}, ETH=$${cg.ethUsd.toFixed(2)})`);
         return { rate, source: 'coingecko' };
       }
     } catch (err: any) {
