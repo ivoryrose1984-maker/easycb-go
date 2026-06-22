@@ -66,8 +66,9 @@ class CbBtcRateOracle {
   private clBtc: ethers.Contract;
   private clEth: ethers.Contract;
   private cachedRate: number | null = null;  // btcUsd / ethUsd = ETH per BTC
-  private cachedAt    = 0;
-  private _lastErrLog = 0;
+  private cachedAt     = 0;
+  private _lastErrLog  = 0;
+  private _lastCgLog   = 0;
 
   constructor(provider: ethers.Provider) {
     this.clBtc = new ethers.Contract(CONFIG.CONTRACTS.CHAINLINK_BTC_USD, CHAINLINK_ABI, provider);
@@ -106,7 +107,11 @@ class CbBtcRateOracle {
         const rate = cg.btcUsd / cg.ethUsd;
         this.cachedRate = rate;
         this.cachedAt   = Date.now();
-        logger.info('cbBTC', `Exchange rate from CoinGecko: BTC/ETH=${rate.toFixed(4)} (BTC=$${cg.btcUsd.toFixed(0)}, ETH=$${cg.ethUsd.toFixed(0)})`);
+        const now = Date.now();
+        if (now - this._lastCgLog > 300_000) {
+          logger.debug('cbBTC', `Exchange rate from CoinGecko: BTC/ETH=${rate.toFixed(4)} (BTC=$${cg.btcUsd.toFixed(0)}, ETH=$${cg.ethUsd.toFixed(0)})`);
+          this._lastCgLog = now;
+        }
         return { rate, source: 'coingecko' };
       }
     } catch (err: any) {

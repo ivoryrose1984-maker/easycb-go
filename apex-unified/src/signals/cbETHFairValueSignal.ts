@@ -78,7 +78,8 @@ class CbEthRateOracle {
   private cbethL1:    ethers.Contract;
   private cachedRate: bigint | null = null;
   private cachedAt    = 0;
-  private _lastChainlinkErrLog = 0;  // throttle: log at most once per 5 minutes
+  private _lastChainlinkErrLog = 0;
+  private _lastCgLog           = 0;
 
   constructor(provider: ethers.Provider) {
     this.clCbEth = new ethers.Contract(CHAINLINK_CBETH_USD, CHAINLINK_ABI, provider);
@@ -141,7 +142,11 @@ class CbEthRateOracle {
         const rate = BigInt(Math.round(cg.cbethRatio * 1e18));
         this.cachedRate = rate;
         this.cachedAt   = Date.now();
-        logger.debug('cbETH', `Exchange rate from CoinGecko: ${cg.cbethRatio.toFixed(6)} (cbETH=$${cg.cbethUsd.toFixed(2)}, ETH=$${cg.ethUsd.toFixed(2)})`);
+        const now = Date.now();
+        if (now - this._lastCgLog > 300_000) {
+          logger.debug('cbETH', `Exchange rate from CoinGecko: ${cg.cbethRatio.toFixed(6)} (cbETH=$${cg.cbethUsd.toFixed(2)}, ETH=$${cg.ethUsd.toFixed(2)})`);
+          this._lastCgLog = now;
+        }
         return { rate, source: 'coingecko' };
       }
     } catch (err: any) {
