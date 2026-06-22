@@ -47,7 +47,7 @@ export class ApexTriangularScanner {
         decision:  hasOpp ? 'opportunity' : 'below_threshold',
       });
       if (!hasOpp) {
-        const skipReason = `spread=${r.spreadBps}bps below threshold`;
+        const skipReason = 'below_threshold';
         logRejection({ strategyId, blockNumber, fees: r.fees, spreadBps: r.spreadBps, reason: skipReason });
         captureDetected({
           opportunityId: `tri-${r.tokens.join('-')}-${r.fees.join('-')}-${blockNumber}`,

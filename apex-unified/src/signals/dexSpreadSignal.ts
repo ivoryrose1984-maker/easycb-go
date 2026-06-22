@@ -311,7 +311,7 @@ export class DexSpreadSignal {
         rejectionReason:  !finalIsOpportunity
           ? thinPool
             ? `thin_pool: ${CONFIG.LIQUIDITY_CHECK_SCALE}x_impact=${impactBps}bps > ${CONFIG.LIQUIDITY_MAX_IMPACT_BPS}bps`
-            : `spread_below_threshold: ${spreadBps}bps < ${CONFIG.MIN_PROFIT_BPS}bps`
+            : 'below_threshold'
           : null,
         safetyDecision:   isSameDex ? 'live_eligible' : 'dry_run_only',
         dryRunOnly:       !isSameDex,

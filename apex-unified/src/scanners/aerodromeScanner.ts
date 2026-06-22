@@ -87,7 +87,7 @@ export class AerodromeScanner {
       }
 
       if (!res.opportunity) {
-        const skipReason = `spread=${res.spreadBps}bps below threshold`;
+        const skipReason = 'below_threshold';
         logRejection({ strategyId, blockNumber, pair: res.pair, reason: skipReason });
         captureDetected({
           opportunityId: `aero-${res.pair}-${blockNumber}-${res.spreadBps}`,
