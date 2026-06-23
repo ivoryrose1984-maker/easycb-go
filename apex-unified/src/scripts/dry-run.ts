@@ -233,7 +233,7 @@ async function main(): Promise<void> {
           ctx.triScanner?.scan(blockNum, ethPrice)       ?? Promise.resolve(null),
           ctx.aeroScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
         ]),
-        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('scan timeout (10s)')), 10_000)),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('scan timeout (25s)')), 25_000)),
       ]);
 
       if (cbethResult)  { stats.cbeth.scans      += cbethResult.scanned;  stats.cbeth.opps      += cbethResult.opportunities.length;  stats.cbeth.errors      += cbethResult.errors; }
