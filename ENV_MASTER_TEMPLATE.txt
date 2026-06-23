@@ -1,0 +1,59 @@
+═══════════════════════════════════════════════════════════════
+  APEX UNIFIED — ENVIRONMENT VARIABLE TEMPLATE
+  Save this in Bitwarden as a Secure Note.
+  Fill in every value, then create apex-unified/.env
+  Never commit the filled-in .env — it is gitignored.
+═══════════════════════════════════════════════════════════════
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ FILE: apex-unified/.env
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ── RPC ─────────────────────────────────────────────────────────────────
+ALCHEMY_WSS_URL=wss://base-mainnet.g.alchemy.com/v2/← YOUR KEY
+CHAIN_ID=8453
+
+# ── Safety flags — do not change for dry run ─────────────────────────────
+DRY_RUN=true
+ALLOW_LIVE=false
+
+# ── Telegram alerts ──────────────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN=← YOUR BOT TOKEN
+TELEGRAM_CHAT_ID=← YOUR CHAT ID
+
+# ── Flash loan contract (fill in after deploy-contract.ts) ───────────────
+APEX_FLASH_LOAN_ADDRESS=0x← DEPLOYED CONTRACT ADDRESS
+
+# ── Strategy toggles ─────────────────────────────────────────────────────
+ENABLE_DEX_SPREAD_SIGNAL=true
+ENABLE_TRIANGULAR_SIGNAL=true
+ENABLE_CBETH_SIGNAL=true
+ENABLE_AERODROME_SIGNAL=true
+ENABLE_CEX_CONTEXT=true
+
+# ── Optional: wallet monitoring (no private key needed for dry run) ───────
+MONITOR_ADDRESS=0x← YOUR WALLET ADDRESS
+
+# ── Min edge threshold in basis points (default 5 = 0.05%) ──────────────
+MIN_NET_EDGE_BPS=5
+
+NODE_ENV=production
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ FILE: dashboard/.env.local  (optional — Phase 4 live dashboard)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+NEXT_PUBLIC_SUPABASE_URL=https://← YOUR PROJECT.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=← YOUR ANON KEY
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ LIVE EXECUTION — Phase 4 only (after 72-hour dry run + score >= 70)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Before flipping live:
+  1. Complete 72-hour dry run (Phase 3 done)
+  2. run: npm run report — readiness score must be >= 70
+  3. Rotate ALL credentials (Alchemy, Telegram, wallet)
+  4. Then and only then: set DRY_RUN=false and ALLOW_LIVE=true
+
+  WALLET_PRIVATE_KEY=0x← 64 hex chars from MetaMask export

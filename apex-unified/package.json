@@ -1,0 +1,36 @@
+{
+  "name": "apex-unified",
+  "version": "1.0.0",
+  "description": "Unified DeFi arbitrage system: Atlas thinks, Grok sees, Apex executes",
+  "main": "dist/scripts/dry-run.js",
+  "scripts": {
+    "build":          "tsc",
+    "dry-run":        "npm run build && node dist/scripts/dry-run.js",
+    "live":           "npm run build && node dist/scripts/live.js",
+    "report":         "npm run build && node dist/scripts/generate-report.js",
+    "replay":         "npm run build && node dist/scripts/replay.js",
+    "compile":        "mkdir -p compiled && npx solc@0.8.19 --bin --abi --optimize --optimize-runs 200 --output-dir compiled src/contracts/ApexFlashLoan.sol && cp compiled/src_contracts_ApexFlashLoan_sol_ApexFlashLoan.bin compiled/ApexFlashLoan.bin && cp compiled/src_contracts_ApexFlashLoan_sol_ApexFlashLoan.abi compiled/ApexFlashLoan.abi",
+    "deploy":         "npm run build && npm run compile && node dist/scripts/deploy-contract.js",
+    "test":           "jest --runInBand",
+    "verify":         "npm run build && npm test && npm run report"
+  },
+  "dependencies": {
+    "@supabase/supabase-js":              "^2.39.0",
+    "dotenv":                             "^16.3.1",
+    "ethers":                             "^6.9.0",
+    "node-telegram-bot-api":              "^0.64.0",
+    "ws":                                 "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/node":                        "^20.10.6",
+    "@types/node-telegram-bot-api":       "^0.64.0",
+    "@types/ws":                          "^8.5.10",
+    "@types/jest":                        "^30.0.0",
+    "jest":                               "^30.4.2",
+    "ts-jest":                            "^29.4.11",
+    "typescript":                         "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

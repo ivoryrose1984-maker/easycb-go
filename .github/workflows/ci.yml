@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-apex-unified:
+    name: apex-unified — TypeScript build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: apex-unified/package-lock.json
+      - run: cd apex-unified && npm ci
+      - run: cd apex-unified && npm run build
+      - name: Verify dry-run entry point exists
+        run: ls apex-unified/dist/scripts/dry-run.js
+      - name: Safety flag check — DRY_RUN must never be false in source
+        run: |
+          if grep -r "DRY_RUN=false\|ALLOW_LIVE=true" \
+            --include="*.ts" apex-unified/src/ \
+            | grep -v "//\|Error("; then
+            echo "FATAL: live execution flag found in source"
+            exit 1
+          fi
+          echo "Safety flags: OK"
+
+  compile-contracts:
+    name: Solidity compile — ApexFlashLoan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install solc 0.8.19
+        run: |
+          pip install solc-select --quiet
+          solc-select install 0.8.19
+          solc-select use 0.8.19
+      - name: Compile ApexFlashLoan
+        run: |
+          solc --bin --abi apex-unified/src/contracts/ApexFlashLoan.sol
+          echo "ApexFlashLoan compiled OK"
