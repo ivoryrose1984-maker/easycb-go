@@ -225,12 +225,15 @@ async function main(): Promise<void> {
     try {
       const ethPrice = await getEthPrice();
 
-      const [cbethResult, cbbtcResult, pairResult, triResult, aeroResult] = await Promise.all([
-        ctx.cbethScanner?.scan(getHttpProvider() ?? ctx.provider, blockNum) ?? Promise.resolve(null),
-        ctx.cbbtcScanner?.scan(blockNum)               ?? Promise.resolve(null),
-        ctx.pairScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
-        ctx.triScanner?.scan(blockNum, ethPrice)       ?? Promise.resolve(null),
-        ctx.aeroScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
+      const [cbethResult, cbbtcResult, pairResult, triResult, aeroResult] = await Promise.race([
+        Promise.all([
+          ctx.cbethScanner?.scan(getHttpProvider() ?? ctx.provider, blockNum) ?? Promise.resolve(null),
+          ctx.cbbtcScanner?.scan(blockNum)               ?? Promise.resolve(null),
+          ctx.pairScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
+          ctx.triScanner?.scan(blockNum, ethPrice)       ?? Promise.resolve(null),
+          ctx.aeroScanner?.scan(blockNum, ethPrice)      ?? Promise.resolve(null),
+        ]),
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('scan timeout (10s)')), 10_000)),
       ]);
 
       if (cbethResult)  { stats.cbeth.scans      += cbethResult.scanned;  stats.cbeth.opps      += cbethResult.opportunities.length;  stats.cbeth.errors      += cbethResult.errors; }
